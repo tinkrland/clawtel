@@ -3,10 +3,14 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "check": "tsc -p tsconfig.json"
+    "check": "tsc -p tsconfig.json",
+    "test": "node --import tsx --test tests/",
+    "start": "tsx server.ts"
   },
   "dependencies": {
+    "@hono/node-server": "^2.1.5",
     "@tenkicloud/sandbox": "^1.1.0",
+    "hono": "^4.13.14",
     "tsx": "^4.23.15",
     "typescript": "^7.0.2"
   },
