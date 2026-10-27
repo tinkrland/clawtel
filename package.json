@@ -1,0 +1,17 @@
+{
+  "name": "clawtel",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "check": "tsc --noEmit --strict --target es2022 --lib es2022,dom --module nodenext --moduleResolution nodenext --allowImportingTsExtensions spawnable/*.ts"
+  },
+  "dependencies": {
+    "@tenkicloud/sandbox": "^1.1.0",
+    "tsx": "^4.23.15",
+    "typescript": "^7.0.2"
+  },
+  "devDependencies": {
+    "@types/node": "^26.6.5",
+    "@types/ws": "^8.18.2"
+  }
+}
