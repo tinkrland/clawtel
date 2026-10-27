@@ -3,7 +3,7 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "check": "tsc --noEmit --strict --target es2022 --lib es2022,dom --module nodenext --moduleResolution nodenext --allowImportingTsExtensions spawnable/*.ts"
+    "check": "tsc -p tsconfig.json"
   },
   "dependencies": {
     "@tenkicloud/sandbox": "^1.1.0",

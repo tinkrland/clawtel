@@ -1,51 +1,23 @@
 # clawtel
 
-a turnkey package for agents that attend, host, demo and stream. born from
-the agent engine: same seams, same honesty rules, new persona per buyer.
+an agent that works from real computers.
 
-or simply put: you press a button, your agent runs your product demo,
-hosts your office hours, and hands you the clips. it renders, it never
-publishes.
+clawtel is a turnkey package for agents that attend, host and demonstrate: it joins meetings, hosts office hours, demos products, streams, and takes everything worth keeping home. one demo pack drives three delivery modes: one-on-one office hours, a livestream demo, and async clips rendered from the same source.
 
-## the thesis
+the agent lives in spawnables. a spawnable is a computer it works from, in two forms: a workbench, persistent, its files and running apps surviving every pause and resume, or a dock, ephemeral, created for one job and destroyed after. idle workbenches cost storage, never compute. or simply put: the agent has a studio it keeps and a workbench it can throw away.
 
-one artifact, the demo pack, drives three delivery modes:
+the agent never fakes. capabilities that are not wired throw honest errors, and closed lanes stay closed: bring keys for the surfaces you want, the rest stay off.
 
-- **office hours**: 1:1 sessions. the agent joins a meeting, shares the
-  deployed product, walks the click path, answers in chat, recaps after.
-- **livestream demo**: the same click path, streamed to twitch, kick or
-  youtube as the venue, chat as the q&a.
-- **async clips**: the capture goes to the render pipeline, gets clipped
-  to 16:9 and 9:16 with safe bands, and is handed back. posting is a
-  human act.
+it renders, never publishes. everything the agent produces, clips, recaps, take-homes, is handed back as a finished artifact. pressing the publish button is always a human act.
 
-## what is a spawnable
+the plate stays real. every backdrop the agent appears in front of is a deterministic scene render, never a generated background, so the same room is the same pixels every time, verifiably.
 
-an agent needs a place to be. a spawnable is a persistent, non-disposable
-computer the agent owns: installed apps, logins and demo state survive
-between sessions. spawnables stop burning compute when idle and come back
-with everything intact.
+## what it does
 
-spawnables arrive through lanes, one seam, env-gated, unset = closed:
+- **intake**: receives from the world (mail, channels, calendars) and turns events into plans
+- **meetings**: joins, presents, interacts (reactions, hands, screenshare), and takes home what matters
+- **capabilities**: promo codes, recaps, transcripts, questions answered with citations
+- **relay**: sends the results back out, on fewer platforms, deliberately
+- **spawnables**: the computers it works from, managed or self-hosted, behind one seam
 
-1. **tenki** (managed, first option): disposable linux vms with pause
-   and resume that preserves memory. no kvm needed from the buyer.
-2. **self-hosted**: opensandbox as the product-grade engine
-   (kubernetes, firecracker, checkpoints to the artifact store, resume
-   on any host). cua and celesto are documented alternates for the
-   single-host case.
-
-see [docs/spawnables.md](docs/spawnables.md) for the lane contract and
-[coverage.md](coverage.md) for what is verified, designed, or not yet
-possible.
-
-## boundaries that never move
-
-- the plate stays real. deterministic proskena renders only, no
-  generated backgrounds, ever. consistency by construction, not prompt
-  discipline.
-- renders, never publishes. the pipeline hands files to a human.
-- env-gated lanes. a capability without its key is closed and says so.
-- the engine never guesses. it shares what it sees or says it cannot.
-
-the agent remains the reference deployment and the first persona.
+each folder carries its own readme stating scope honestly: what is wired, what is designed, what is not possible.

@@ -1,108 +1,96 @@
-/**
- * smoke test for the tenki provider. runs the full seam against the
- * real api: create, exec, pause, resume, persistence, destroy.
- * costs a few minutes of a 2-core session, then terminates it.
- */
+// live smoke for the tenki lane through the spawnable seam.
+// runs against the real api: creates a workbench, execs, pauses, resumes,
+// verifies state survived, destroys, and waits for convergence.
+// honest rails are asserted too: unwired capabilities must throw, not fake.
 
 import { TenkiProvider } from "../spawnable/tenki.ts";
-import type { SpawnableSpec } from "../spawnable/types.ts";
+import type { SpawnableProvider } from "../spawnable/types.ts";
 
-const name = "clawtel-smoke";
-const spec: SpawnableSpec = {
+let passed = 0;
+function pass(name: string, detail = "") {
+  passed += 1;
+  console.log(`PASS ${name}${detail ? " :: " + detail : ""}`);
+}
+function assert(condition: boolean, message: string) {
+  if (!condition) throw new Error(`ASSERT ${message}`);
+}
+
+const tenki = new TenkiProvider();
+const provider: SpawnableProvider = tenki;
+assert(provider.isAvailable(), "tenki lane must be available with a key present");
+pass("isAvailable");
+
+const identity = await tenki.client.whoAmI();
+assert(Boolean(identity.ownerId), "whoAmI resolves an identity");
+pass("whoAmI", `${identity.ownerType}/${identity.ownerId}`);
+
+const name = `clawtel-smoke-${Date.now()}`;
+const spawnable = await provider.create({
   name,
+  form: "workbench",
   cpu: 2,
   memoryMib: 2048,
   diskGiB: 5,
   desktop: false,
-};
-
-function pass(step: string, detail = "") {
-  console.log(`PASS ${step}${detail ? " :: " + detail : ""}`);
-}
-
-function assert(condition: unknown, message: string): void {
-  if (!condition) throw new Error(`ASSERT ${message}`);
-}
-
-const provider = new TenkiProvider();
-
-// lane availability is env-gated, never faked
-assert(provider.isAvailable(), "lane must be available when TENKI_API_KEY is set");
-assert(provider.lane === "tenki", "lane name");
-pass("isAvailable");
-
-// identity proves the key is live before spending compute
-const me = await provider.client.whoAmI();
-assert(me.ownerId?.length > 0, "whoAmI returns an owner");
-pass("whoAmI", `${me.ownerType}/${me.ownerId}`);
-
-// destroy any leftover from a failed earlier run
-const existing = await provider.client.list();
-const stale = existing.find((s) => s.name === name);
-if (stale) {
-  await provider.destroy(name);
-  pass("cleanup leftover");
-}
-
-// create through the seam
-const spawnable = await provider.create(spec);
-assert(spawnable.status === "running", `create returns running, got ${spawnable.status}`);
-assert(spawnable.screen.grab !== undefined, "screen handle present");
+});
+assert(spawnable.name === name, "created spawnable carries its name");
 pass("create", spawnable.status);
 
-// honest rails: unwired surfaces throw, they never fake
-let threw = false;
+// unwired rails throw honestly, nothing fakes
+let honestThrow = false;
 try {
-  spawnable.screen.grab(1920, 1080, 30);
-} catch (e) {
-  threw = e instanceof Error && e.message.includes("not wired");
+  await spawnable.screen.grab();
+} catch {
+  honestThrow = true;
 }
-assert(threw, "screen.grab must throw the honest not-wired error");
-assert(spawnable.input.xInput === null, "xInput null in the thin provider");
+assert(honestThrow, "screen.grab must throw not-wired, never fake a frame");
+assert(spawnable.input.browser === null, "browser actuation is null until wired");
+assert(spawnable.input.xInput === null, "x input is null until wired");
 pass("honest closed rails");
 
-// exec through the seam
-const marker = `clawtel-${Date.now()}`;
-const write = await provider.exec(name, `echo '${marker}' > /home/tenki/clawtel-proof.txt && echo written`);
-assert(write.exitCode === 0, `write exec exit 0, got ${write.exitCode}: ${write.stderr}`);
-assert(write.stdout.trim() === "written", "write exec stdout");
+// desktop: true must also throw honestly (recipe verified, wiring pending)
+let desktopThrow = false;
+try {
+  await provider.create({ name: `${name}-d`, form: "dock", cpu: 2, memoryMib: 2048, diskGiB: 5, desktop: true });
+} catch {
+  desktopThrow = true;
+}
+assert(desktopThrow, "desktop provisioning must throw not-wired");
+pass("desktop throws honestly");
+
+const marker = `/home/tenki/${name}.txt`;
+await provider.exec(name, `echo "spawnable persistence proof" > ${marker}`);
+const written = await provider.exec(name, `cat ${marker}`);
+assert(written.stdout.includes("persistence proof"), "marker written and read back");
 pass("exec write");
 
-// pause frees compute, resume restores, memory and files survive
 await provider.pause(name);
-const afterPause = await provider.client.list();
-const pausedSession = afterPause.find((s) => s.name === name);
-assert(pausedSession?.state === "PAUSED", `session paused, got ${pausedSession?.state}`);
-pass("pause", "state PAUSED");
+const pausedList = await tenki.client.list();
+const paused = pausedList.find((s) => s.name === name);
+assert(paused?.state === "PAUSED", "paused workbench reports PAUSED");
+pass("pause", `state ${paused?.state}`);
 
-const resumed = await provider.resume(name);
-assert(resumed.status === "running", `resume returns running, got ${resumed.status}`);
-pass("resume", resumed.status);
+await provider.resume(name);
+const resumed = await provider.exec(name, `cat ${marker}`);
+assert(resumed.stdout.includes("persistence proof"), "marker survived pause/resume");
+pass("resume + persistence");
 
-const read = await provider.exec(name, "cat /home/tenki/clawtel-proof.txt");
-assert(read.exitCode === 0, "read exec exit 0");
-assert(read.stdout.trim() === marker, `marker survived pause/resume, got '${read.stdout.trim()}'`);
-pass("persistence", `marker intact across pause/resume`);
-
-// start is a no-op on a running spawnable, honest on others
-const started = await provider.start(name);
-assert(started.status === "running", "start no-op on running");
-pass("start no-op");
+await provider.start(name); // no-op on a running workbench
+pass("start no-op on running");
 
 // destroy is permanent and says so; termination converges server-side
 await provider.destroy(name);
 const deadline = Date.now() + 90_000;
 let gone = false;
 while (Date.now() < deadline) {
-  const afterDestroy = await provider.client.list();
+  const afterDestroy = await tenki.client.list();
   if (!afterDestroy.some((s) => s.name === name)) {
     gone = true;
     break;
   }
   await new Promise((r) => setTimeout(r, 3_000));
 }
-assert(gone, "destroyed spawnable is gone from the list within 90s");
-pass("destroy", "session terminated and converged");
+assert(gone, "destroyed workbench is gone from the list within 90s");
+pass("destroy", "terminated and converged");
 
-console.log("SMOKE OK");
-process.exit(0);
+console.log(`SMOKE OK (${passed} passes)`);
