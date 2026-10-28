@@ -85,6 +85,15 @@ export function transitionMeeting(
   return meeting;
 }
 
+export function getSession(id: string): string | undefined {
+  return getMeeting(id)?.sessionId;
+}
+
+export function clearSession(id: string): void {
+  const meeting = getMeeting(id);
+  if (meeting) delete meeting.sessionId;
+}
+
 export function setSession(id: string, sessionId: string): void {
   const meeting = meetings.get(id);
   if (!meeting) throw new Error(`no meeting ${id}`);

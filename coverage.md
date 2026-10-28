@@ -50,7 +50,9 @@ closed). 71 tests + typecheck green, live smoke oct 27 2026.
 | api door (bearer gate, health outside) | verified | live smoke: no token = 401/503, health open, routes answer |
 | join url resolution (zoom j/x/my, meet, teams, whatsapp calls, twitch/kick/youtube, link share) | verified | tests/resolver.test.ts, 12 cases incl. passcode + guest-call hosts |
 | meeting state machine (planned, joining, in_meeting, take_home, done; skips refused) | verified | meetings/meeting.ts + join-unwind on failure, tests in server suite |
-| join engine + browser lane seam | designed | the lane interface + closed-lane refusal are real and tested; no cloud browser lane wired yet, nothing fakes a join |
+| join engine + browser lane seam | verified | engine tested with stub lanes (a browser opening a url is not a join: honest joined:false, meeting stays planned); platform module seam completes the join when wired |
+| spawnable browser lane (browser inside a dock, cdp through the tunnel) | verified | live smoke oct 28 2026 via scripts/browser-lane-smoke.ts: dock with desktop provisioning (sudo recipe, exit-code checked), headed chrome on xvfb, nginx cdp shim on 9333 (preview urls reach all-interface ports only, chrome binds loopback and checks host), tunnel, cdp tab, navigate, evaluate, click+type round trip, real png screenshot, clean destroy |
+| browser lane api wiring | verified | live oct 28 2026: CLAWTEL_BROWSER_LANE=spawnable opt-in (unset = closed, no test spawns), join route returns the honest attempt (joined:false + why), browser/close route destroys the dock, no sessions leaked |
 | zoom join signature (hmac-sha256, round trip verified) | verified | meetings/platforms/zoom/signature.ts + signature tests: decode, recompute, forged payload fails |
 | meet reactions (the tray's documented names, unknown refused) | verified | MEET_REACTIONS list + normalize + dom expression; live click needs a lane |
 | raise hand rules (already-raised = success, lower never clicked by a raise) | verified | decideHand pure machine + hand expression, tests green |
@@ -68,9 +70,11 @@ closed). 71 tests + typecheck green, live smoke oct 27 2026.
 
 ## honest gaps
 
-- the browser lane: no cloud browser provider is wired, so joining is a
-  closed lane. the clawtel-native answer (the join tab lives in a
-  spawnable browser) is the designed path, not yet wired.
+- the browser lane is live (a browser inside a dock, cdp through the
+  tunnel) but the platform join page seams are not: zoom needs its web
+  sdk hosted page + sdk credentials, meet needs its auth + camera flow.
+  a join attempt opens the browser and reports joined:false honestly
+  until a platform module is wired.
 - interactivity expressions are built and rule-tested but never
   evaluated against a live meeting page. one real meeting verifies the
   family.

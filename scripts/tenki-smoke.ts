@@ -48,15 +48,9 @@ assert(spawnable.input.browser === null, "browser actuation is null until wired"
 assert(spawnable.input.xInput === null, "x input is null until wired");
 pass("honest closed rails");
 
-// desktop: true must also throw honestly (recipe verified, wiring pending)
-let desktopThrow = false;
-try {
-  await provider.create({ name: `${name}-d`, form: "dock", cpu: 2, memoryMib: 2048, diskGiB: 5, desktop: true });
-} catch {
-  desktopThrow = true;
-}
-assert(desktopThrow, "desktop provisioning must throw not-wired");
-pass("desktop throws honestly");
+// desktop provisioning is live-verified by scripts/browser-lane-smoke.ts
+// (the full dock: xvfb + headed chrome + cdp through the tunnel). this
+// smoke keeps its run cheap and skips it.
 
 const marker = `/home/tenki/${name}.txt`;
 await provider.exec(name, `echo "spawnable persistence proof" > ${marker}`);

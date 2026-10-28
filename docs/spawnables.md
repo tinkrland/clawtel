@@ -22,7 +22,7 @@ a verified provisioning recipe exists: xvfb virtual display plus headed chrome, 
 
 ## honest gaps
 
-- desktop provisioning (the xvfb + chrome recipe) is verified but not wired into create() yet
+- desktop provisioning (the xvfb + chrome recipe) is wired into create() and live-smoked via the browser lane
 - screen grab/capture handles, browser actuation and x-level input throw not-wired errors, nothing fakes
 - native-app demos need an x input seam, that is new code, not a config change
 - windows guests run on the vm lane but feed the pixel pipeline differently (rdp capture, not x11grab), also new code

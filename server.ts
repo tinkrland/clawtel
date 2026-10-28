@@ -8,7 +8,7 @@ import { Hono } from "hono";
 import { TenkiProvider } from "./spawnable/tenki.ts";
 import { planFromEvent, meetingFromResolved } from "./intake/planner.ts";
 import { resolveJoinUrl } from "./meetings/joining/resolver.ts";
-import { joinMeeting, leaveMeeting } from "./meetings/joining/engine.ts";
+import { closeMeetingBrowser, joinMeeting, leaveMeeting } from "./meetings/joining/engine.ts";
 import { getMeeting, listMeetings, transitionMeeting } from "./meetings/meeting.ts";
 import { normalizeReaction, reactionExpression, reactionOutcome } from "./meetings/interactivity/reactions.ts";
 import { decideHand, handExpression, handOutcome } from "./meetings/interactivity/hand.ts";
@@ -20,6 +20,20 @@ import { answerFromTranscriptId } from "./capabilities/questions/answers.ts";
 import { runRecap, type FetchLane, type TranscribeLane } from "./capabilities/recap/pipeline.ts";
 import { emailLaneAvailable, renderCaptureEmail, sendEmail, type OutgoingEmail } from "./relay/email.ts";
 import { spawnableList, spawnableCreate, spawnableDestroy, spawnableStatus } from "./spawnable/manager.ts";
+import { setBrowserLane } from "./meetings/joining/engine.ts";
+import { SpawnableBrowserLane } from "./meetings/joining/spawnable-browser.ts";
+
+// the browser lane is an explicit opt-in, not a side effect of holding
+// a spawnable key: CLAWTEL_BROWSER_LANE names the lane, and the lane
+// still checks its own env gate. unset = closed, nothing spawns.
+if (process.env.CLAWTEL_BROWSER_LANE === "spawnable") {
+  const lane = new SpawnableBrowserLane();
+  if (lane.isAvailable()) {
+    setBrowserLane(lane);
+  } else {
+    console.log("clawtel: browser lane opt-in was set but the spawnable lane has no key, staying closed");
+  }
+}
 
 const app = new Hono();
 
@@ -85,8 +99,18 @@ app.post("/api/meetings", async (c) => {
 
 app.post("/api/meetings/:id/join", async (c) => {
   try {
-    const result = await joinMeeting(c.req.param("id"));
-    return c.json({ joined: result });
+    const attempt = await joinMeeting(c.req.param("id"));
+    // joined: false is an honest answer, not an error
+    return c.json({ attempt });
+  } catch (err) {
+    return c.json({ error: (err as Error).message }, 409);
+  }
+});
+
+app.post("/api/meetings/:id/browser/close", async (c) => {
+  try {
+    await closeMeetingBrowser(c.req.param("id"));
+    return c.json({ closed: true, meetingId: c.req.param("id") });
   } catch (err) {
     return c.json({ error: (err as Error).message }, 409);
   }

@@ -12,7 +12,8 @@
     "@tenkicloud/sandbox": "^1.1.0",
     "hono": "^4.13.14",
     "tsx": "^4.23.15",
-    "typescript": "^7.0.2"
+    "typescript": "^7.0.2",
+    "ws": "^8.22.0"
   },
   "devDependencies": {
     "@types/node": "^26.6.5",

@@ -76,18 +76,63 @@ export class TenkiProvider implements SpawnableProvider {
 
   async create(spec: SpawnableSpec): Promise<Spawnable> {
     if (!this.isAvailable()) throw new Error("tenki lane is closed: TENKI_API_KEY is unset");
-    if (spec.desktop) {
-      throw new Error(
-        "desktop provisioning is not wired yet. the xvfb + headed chrome recipe is verified (coverage.md), wiring it is pending.",
-      );
-    }
     const session = await this.client.createAndWait({
       name: spec.name,
       cpuCores: spec.cpu,
       memoryMb: spec.memoryMib,
       diskSizeGb: spec.diskGiB,
     });
+    if (spec.desktop) {
+      await this.provisionDesktop(spec.name);
+    }
     return this.wrap(session, spec.form);
+  }
+
+  /**
+   * desktop provisioning, the verified recipe: a real x display plus
+   * headed chrome inside the spawnable, so the join tab lives where a
+   * screen exists to share. apt chrome .deb plus xvfb, ~42s on a fresh
+   * image. the display is :0 at 1920x1080x24.
+   */
+  private async provisionDesktop(name: string): Promise<void> {
+    // the spawnable runs as a user with passwordless sudo, never as
+    // root; every step is exit-code checked, failures are never
+    // swallowed
+    const apt = await this.exec(
+      name,
+      "sudo apt-get update -qq && sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq xvfb wget ca-certificates",
+      180_000,
+    );
+    if (apt.exitCode !== 0) {
+      throw new Error(`desktop provisioning failed at apt: ${apt.stderr.slice(0, 200)}`);
+    }
+    const chrome = await this.exec(
+      name,
+      "wget -q https://dl.google.com/linux/direct/google-chrome-stable_current_amd64.deb -O /tmp/chrome.deb && sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq /tmp/chrome.deb",
+      180_000,
+    );
+    if (chrome.exitCode !== 0) {
+      throw new Error(`desktop provisioning failed at chrome install: ${chrome.stderr.slice(0, 200)}`);
+    }
+    // the display daemon: backgrounded, disowned, logged where the
+    // room can read it back
+    await this.exec(
+      name,
+      "nohup Xvfb :0 -screen 0 1920x1080x24 >/tmp/xvfb.log 2>&1 & sleep 1",
+      15_000,
+    );
+    // no xdpyinfo dependency: the x socket is the proof the display is up
+    const check = await this.exec(name, "test -S /tmp/.X11-unix/X0 && echo up", 15_000);
+    if (!check.stdout.includes("up")) {
+      throw new Error("desktop provisioning failed: the x display did not come up. read /tmp/xvfb.log in the spawnable.");
+    }
+  }
+
+  /** expose a port through the tenki tunnel; the preview url reaches it from outside. */
+  async exposePort(name: string, port: number): Promise<{ port: number; previewUrl: string }> {
+    const session = await this.requireSession(name);
+    const exposed = await session.exposePort(port);
+    return { port: exposed.port, previewUrl: exposed.previewUrl };
   }
 
   private wrap(session: Session, _form: SpawnableForm): Spawnable {

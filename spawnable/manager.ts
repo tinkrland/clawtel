@@ -7,6 +7,8 @@ import { TenkiProvider } from "./tenki.ts";
 import type { SpawnableSpec } from "./types.ts";
 
 const tenki = new TenkiProvider();
+/** the shared provider instance: lanes and routes use one client. */
+export const tenkiProvider = tenki;
 
 export interface LaneStatus {
   lane: string;
