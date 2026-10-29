@@ -21,6 +21,7 @@ import { runRecap, type FetchLane, type TranscribeLane } from "./capabilities/re
 import { emailLaneAvailable, renderCaptureEmail, sendEmail, type OutgoingEmail } from "./relay/email.ts";
 import { spawnableList, spawnableCreate, spawnableDestroy, spawnableStatus } from "./spawnable/manager.ts";
 import { setBrowserLane } from "./meetings/joining/engine.ts";
+import { memory } from "./retelldb/client.ts";
 import { SpawnableBrowserLane } from "./meetings/joining/spawnable-browser.ts";
 
 // the browser lane is an explicit opt-in, not a side effect of holding
@@ -32,6 +33,24 @@ if (process.env.CLAWTEL_BROWSER_LANE === "spawnable") {
     setBrowserLane(lane);
   } else {
     console.log("clawtel: browser lane opt-in was set but the spawnable lane has no key, staying closed");
+  }
+}
+
+// the memory lane: real data goes in on every write that matters. an
+// ingest failure never fails the write (the meeting happened whether
+// or not memory heard about it); it is logged and the write stands.
+const PERSONA_ID = process.env.CLAWTEL_PERSONA_ID || "clawtel";
+
+async function remember(
+  kind: "meeting" | "capture" | "transcript",
+  nodes: Parameters<typeof memory.ingest>[1],
+  artifacts: Parameters<typeof memory.ingest>[2] = [],
+  scope?: { platform: string; connection_id?: string },
+): Promise<void> {
+  if (!memory.isAvailable()) return;
+  const result = await memory.ingest(PERSONA_ID, nodes, artifacts, scope);
+  if (!result.ok) {
+    console.warn(`clawtel: memory did not take the ${kind}: ${result.reason}`);
   }
 }
 
@@ -93,6 +112,17 @@ app.post("/api/meetings", async (c) => {
     resolved,
     body.start_time,
     body.join_delay_minutes,
+  );
+  await remember(
+    "meeting",
+    [{
+      type: "event",
+      key: `meeting:${meeting.id}`,
+      text: `planned meeting: ${meeting.title} on ${meeting.platform}${meeting.startTime ? `, starts ${meeting.startTime}` : ""}`,
+      platform: meeting.platform,
+    }],
+    [],
+    { platform: meeting.platform },
   );
   return c.json({ meeting }, 201);
 });
@@ -214,6 +244,19 @@ app.post("/api/captures", async (c) => {
       meetingEndsAt: meeting?.startTime ?? null,
     });
     recordCapture(capture);
+    const platform = meeting?.platform ?? "zoom";
+    await remember(
+      "capture",
+      [{
+        type: "fact",
+        key: `capture:${capture.id}`,
+        text: `heard in a meeting: ${capture.quote}${capture.code ? ` (code ${capture.code})` : ""}`,
+        tags: ["capture", ...(capture.code ? ["code"] : []), ...(capture.scarcity.matched ?? [])],
+        platform,
+      }],
+      [],
+      { platform },
+    );
     return c.json({ capture, subject: captureSubject(capture) }, 201);
   } catch (err) {
     return c.json({ error: (err as Error).message }, 400);
@@ -237,6 +280,32 @@ app.post("/api/transcripts", async (c) => {
   const segments: TranscriptSegment[] = Array.isArray(body?.segments) ? body.segments : [];
   if (!segments.length) return c.json({ error: "a transcript needs segments" }, 400);
   const transcript = storeTranscript(segments, { meetingId: body.meeting_id, sourceUrl: body.source_url });
+  const meeting = body.meeting_id ? getMeeting(body.meeting_id) : undefined;
+  const platform = meeting?.platform ?? "zoom";
+  const lines = transcript.segments
+    .map((seg) => `${citationTime(seg.startMs)} ${seg.speaker}: ${seg.text}`)
+    .join("\n");
+  await remember(
+    "transcript",
+    transcript.segments.map((seg, i) => ({
+      type: "event",
+      key: `transcript:${transcript.id}:${i}`,
+      text: `${seg.speaker}: ${seg.text}`,
+      platform,
+      pointer: citationTime(seg.startMs),
+      tags: ["transcript"],
+      artifact_index: 0,
+    })),
+    [{
+      name: `transcript-${transcript.id}.txt`,
+      content: lines,
+      mime: "text/plain",
+      platform,
+      tags: ["transcript"],
+      source_uri: transcript.sourceUrl,
+    }],
+    { platform },
+  );
   return c.json({ transcript }, 201);
 });
 
@@ -320,6 +389,56 @@ app.post("/api/relay/capture-email", async (c) => {
   } catch (err) {
     return c.json({ error: (err as Error).message }, 503);
   }
+});
+
+// --- memory (the retelldb layer) ---
+
+app.get("/api/memory/status", async (c) => {
+  const result = await memory.status();
+  if (!result.ok) return c.json({ enabled: false, reason: result.reason }, 200);
+  return c.json({ enabled: true, ...result.data });
+});
+
+app.post("/api/memory/query", async (c) => {
+  const body = await c.req.json().catch(() => null);
+  if (!body?.query || !body?.platform) {
+    return c.json({ error: "a query needs query and platform. an undeclared surface reads as nothing." }, 400);
+  }
+  const result = await memory.query(body.query, {
+    persona_id: body.persona_id ?? PERSONA_ID,
+    platform: body.platform,
+    connection_id: body.connection_id,
+  }, body.limit);
+  if (!result.ok) return c.json({ enabled: false, reason: result.reason }, 200);
+  return c.json({ enabled: true, ...result.data });
+});
+
+app.post("/api/memory/ground", async (c) => {
+  const body = await c.req.json().catch(() => null);
+  if (!body?.platform) {
+    return c.json({ error: "a brief needs a platform. an undeclared surface reads as nothing." }, 400);
+  }
+  const result = await memory.ground(body.query ?? "", {
+    persona_id: body.persona_id ?? PERSONA_ID,
+    platform: body.platform,
+    connection_id: body.connection_id,
+  }, body.limit);
+  if (!result.ok) return c.json({ enabled: false, reason: result.reason }, 200);
+  return c.json(result.data);
+});
+
+app.post("/api/memory/tool", async (c) => {
+  const body = await c.req.json().catch(() => null);
+  if (!body?.name || !body?.platform) {
+    return c.json({ error: "a tool call needs name and platform" }, 400);
+  }
+  const result = await memory.tool(body.name, body.args ?? {}, {
+    persona_id: body.persona_id ?? PERSONA_ID,
+    platform: body.platform,
+    connection_id: body.connection_id,
+  });
+  if (!result.ok) return c.json({ enabled: false, reason: result.reason }, 200);
+  return c.json(result.data);
 });
 
 // --- spawnables ---
