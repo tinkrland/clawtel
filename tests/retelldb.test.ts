@@ -46,7 +46,7 @@ before(async () => {
   // provider keys are stripped on purpose: the test runs the closed
   // lanes (a real model call costs money and proves nothing here)
   const env: NodeJS.ProcessEnv = { ...process.env, PORT: String(PORT) };
-  for (const k of ["FEATHERLESS_API_KEY", "FEATHERLESS_API_KEY_2", "TENSORMUX_TOKEN", "OPENAI_API_KEY", "GEMINIAPIKEY", "RETELLDB_LLM_BASE_URL", "RETELLDB_EMBED_BASE_URL"]) {
+  for (const k of ["FEATHERLESS_API_KEY", "FEATHERLESS_API_KEY_2", "TENSORMUX_TOKEN", "OPENAI_API_KEY", "GEMINIAPIKEY", "BACKBOARD_TOKEN", "RETELLDB_LLM_PROVIDER", "RETELLDB_LLM_BASE_URL", "RETELLDB_EMBED_BASE_URL"]) {
     delete env[k];
   }
   service = spawn("python3", ["retelldb/app.py"], { env, stdio: "ignore" });

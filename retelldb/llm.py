@@ -45,6 +45,17 @@ def resolve_providers():
             "model": model or "Qwen/Qwen2.5-72B-Instruct",
             "name": "featherless",
         })
+    # backboard: a memory platform with its own thread/run protocol. the
+    # transport differs (a thread message, then run-scoped tool outputs),
+    # so the rung carries a style marker and the client dispatches on it.
+    if _env("BACKBOARD_TOKEN"):
+        out.append({
+            "base_url": "https://app.backboard.io/api",
+            "key": _env("BACKBOARD_TOKEN"),
+            "model": model or "gpt-4o-mini",
+            "name": "backboard",
+            "style": "backboard",
+        })
     if _env("OPENAI_API_KEY"):
         out.append({
             "base_url": _env("OPENAI_BASE_URL") or "https://api.openai.com/v1",
@@ -52,6 +63,11 @@ def resolve_providers():
             "model": model or "gpt-4.1-mini",
             "name": "openai",
         })
+    pin = _env("RETELLDB_LLM_PROVIDER")
+    if pin:
+        pinned = [p for p in out if p["name"] == pin]
+        # an unknown pin must not silently fall through to another rail
+        return pinned
     return out
 
 
@@ -89,6 +105,8 @@ class LlmClient:
         return self.provider["name"] + ":" + self.provider["model"]
 
     def chat(self, messages, tools=None, max_tokens=700, temperature=0.2):
+        if self.provider and self.provider.get("style") == "backboard":
+            return self._chat_backboard(messages, tools)
         if not self.provider:
             raise RuntimeError(
                 "the llm lane is closed: no provider key resolved (RETELLDB_LLM_BASE_URL+API_KEY, "
@@ -158,6 +176,92 @@ class LlmClient:
         }
 
 
+    # --- backboard: threads, runs, and run-scoped tool outputs ---------
+    #
+    # backboard is not a bare completions url. a call is a message on a
+    # thread; when the model wants a tool the message answers with
+    # status REQUIRES_ACTION and a run_id, and the way to hand results
+    # back is that run's submit endpoint. the system turn rides inside
+    # the first message (the api takes content, not a role array), and
+    # the thread is reused across a run so the model keeps its own
+    # context between tool rounds.
+
+    def _chat_backboard(self, messages, tools=None):
+        provider = self.provider
+        state = getattr(self, "_bb", None) or {}
+        self._bb = state
+        headers = {
+            "content-type": "application/json",
+            "x-api-key": provider["key"],
+            # cloudflare in front of the api refuses bare clients
+            "user-agent": "Mozilla/5.0 (compatible; clawtel-retelldb/1.0)",
+        }
+
+        def post(path, payload):
+            req = urllib.request.Request(
+                provider["base_url"] + path,
+                data=json.dumps(payload).encode(),
+                headers=headers,
+                method="POST",
+            )
+            with urllib.request.urlopen(req, timeout=120) as res:
+                return json.loads(res.read().decode())
+
+        try:
+            if state.get("thread_id") and state.get("run_id"):
+                # a tool round: hand the run its outputs, nothing else
+                outputs = _backboard_tool_outputs(messages)
+                if not outputs:
+                    raise RuntimeError("a backboard follow-up needs tool outputs; none in the transcript")
+                body = post(
+                    f"/threads/{state['thread_id']}/runs/{state['run_id']}/submit-tool-outputs",
+                    {"tool_outputs": outputs},
+                )
+            else:
+                system = "\n".join(m["content"] for m in messages if m.get("role") == "system" and m.get("content"))
+                user = "\n".join(m["content"] for m in messages if m.get("role") == "user" and m.get("content"))
+                content = (system + "\n\n" + user).strip() if system else user
+                payload = {"content": content, "model_name": provider["model"]}
+                if tools:
+                    payload["tools"] = tools
+                    payload["tool_choice"] = "auto"
+                body = post("/threads/messages", payload)
+        except Exception as err:
+            note_llm_call(False, f"{type(err).__name__}: {err}")
+            raise
+
+        note_llm_call(True)
+        LLM_HEALTH["served_by"] = provider["name"] + ":" + provider["model"]
+        state["thread_id"] = body.get("thread_id") or state.get("thread_id")
+        state["run_id"] = body.get("run_id")
+        status = body.get("status")
+        # backboard echoes the run's tool calls on the completed reply too.
+        # a call is only actionable while the run is waiting on us, so a
+        # completed turn reports none, or the agent would re-run the same
+        # tool forever.
+        calls = (body.get("tool_calls") or []) if status == "REQUIRES_ACTION" else []
+        return {
+            "content": body.get("content") or "",
+            "tool_calls": calls,
+            "finish": status,
+        }
+
+
+def _backboard_tool_outputs(messages):
+    """the tool results the agent appended since the last assistant turn,
+    in the shape the run submit endpoint takes."""
+    calls = {}
+    out = []
+    for m in messages:
+        if m.get("role") == "assistant" and m.get("tool_calls"):
+            for tc in m["tool_calls"]:
+                fn = (tc.get("function") or {})
+                calls[tc.get("id")] = fn.get("name") or ""
+        elif m.get("role") == "tool" and m.get("tool_call_id"):
+            out.append({"tool_call_id": m["tool_call_id"], "output": m.get("content") or ""})
+    return [o for o in out if o["tool_call_id"] in calls]
+
+
 LLM_HEALTH = {"calls": 0, "ok_calls": 0, "last_error": None, "served_by": None}
 
 
@@ -179,7 +283,10 @@ def llm_status():
         "configured": client.available,
         "healthy": healthy,
         "calls": LLM_HEALTH["calls"],
-        "provider": client.label,
+        # the rung that actually served wins; the first rung is named
+        # separately so a pinned or failed-over ladder reads honestly
+        "provider": LLM_HEALTH["served_by"] or client.label,
+        "first_rung": client.label,
         "last_error": LLM_HEALTH["last_error"],
         "reason": None if client.available else "no llm provider: set RETELLDB_LLM_BASE_URL and RETELLDB_LLM_API_KEY, or a known provider key",
     }
