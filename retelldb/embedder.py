@@ -13,6 +13,14 @@ DEFAULT_GEMINI_MODEL = "text-embedding-004"
 DEFAULT_OPENAI_MODEL = "text-embedding-3-small"
 
 
+# cloudflare fronts the openai-shaped providers and refuses plain
+# urllib agents, so every request carries a browser user-agent
+_UA = (
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 "
+    "(KHTML, like Gecko) Chrome/131.0 Safari/537.36"
+)
+
+
 def _env(name, default=None):
     v = os.environ.get(name)
     return v.strip() if isinstance(v, str) and v.strip() else default
@@ -80,6 +88,9 @@ class OpenAICompatEmbedder(Embedder):
                 headers={
                     "content-type": "application/json",
                     "authorization": "Bearer " + self.key,
+                    # cloudflare fronts these apis and refuses plain
+                    # urllib agents
+                    "user-agent": _UA,
                 },
             )
             with urllib.request.urlopen(req, timeout=30) as res:
@@ -89,6 +100,43 @@ class OpenAICompatEmbedder(Embedder):
         return out
 
 
+class LadderEmbedder(Embedder):
+    """several rungs, tried in order, each with its own receipts. a
+    configured key is not a working one, so a dead rung is walked past
+    at call time instead of trusted because it exists."""
+
+    def __init__(self, rungs):
+        self.rungs = [r for r in rungs if r is not None and r.available]
+        self.served = None
+
+    @property
+    def available(self):
+        return bool(self.rungs)
+
+    @property
+    def label(self):
+        if self.served is not None:
+            return self.served
+        return self.rungs[0].label if self.rungs else "closed"
+
+    def first_label(self):
+        return self.rungs[0].label if self.rungs else "closed"
+
+    def _embed(self, texts):
+        last = None
+        for rung in self.rungs:
+            try:
+                vecs = rung._embed(texts)
+            except Exception as err:  # noqa: BLE001 - walk past any dead rung
+                last = err
+                note_embed_call(False, f"{rung.label}: {type(err).__name__}: {err}")
+                continue
+            note_embed_call(True)
+            self.served = rung.label
+            return vecs
+        raise last if last is not None else RuntimeError("no embedder rung answered")
+
+
 def get_embedder():
     """explicit lane wins; auto picks the provider whose env is present."""
     lane = _env("RETELLDB_EMBEDDER")
@@ -96,16 +144,34 @@ def get_embedder():
     base = _env("RETELLDB_EMBED_BASE_URL") or _env("EMBEDDINGS_BASE_URL")
     key = _env("RETELLDB_EMBED_API_KEY") or _env("EMBEDDINGS_API_KEY")
 
+    featherless_keys = [k for k in (_env("FEATHERLESS_API_KEY_2"), _env("FEATHERLESS_API_KEY")) if k]
+
+    custom = OpenAICompatEmbedder(base, key, _env("RETELLDB_EMBED_MODEL")) if base and key else None
+    gemini = GeminiEmbedder(gemini_key, _env("RETELLDB_EMBED_MODEL")) if gemini_key else None
+    featherless = (
+        OpenAICompatEmbedder(
+            "https://api.featherless.ai/v1",
+            featherless_keys[0],
+            _env("RETELLDB_EMBED_MODEL") or "Qwen/Qwen3-Embedding-0.6B",
+        )
+        if featherless_keys
+        else None
+    )
+    if featherless is not None:
+        featherless.label = "featherless:" + featherless.model
+
     if lane in (None, "auto"):
-        if base and key:
-            return OpenAICompatEmbedder(base, key, _env("RETELLDB_EMBED_MODEL"))
-        if gemini_key:
-            return GeminiEmbedder(gemini_key, _env("RETELLDB_EMBED_MODEL"))
-        return Embedder()
+        # explicit config first, then the rungs that exist. gemini's key
+        # has been observed invalid, so it sits after featherless; the
+        # ladder walks past it if it fails again.
+        return LadderEmbedder([custom, featherless, gemini])
+
     if lane == "gemini" and gemini_key:
-        return GeminiEmbedder(gemini_key, _env("RETELLDB_EMBED_MODEL"))
-    if lane == "openai" and base and key:
-        return OpenAICompatEmbedder(base, key, _env("RETELLDB_EMBED_MODEL"))
+        return LadderEmbedder([gemini])
+    if lane == "featherless" and featherless:
+        return LadderEmbedder([featherless])
+    if lane == "openai" and custom:
+        return LadderEmbedder([custom])
     return Embedder()
 
 

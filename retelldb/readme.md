@@ -33,3 +33,20 @@
 //
 // lanes: lexical retrieval works with zero services and says so. the
 // embedder lane is a closed contract until an embedder key exists.
+
+## the embedder lane
+
+featherless serves embeddings on the same openai-shaped contract:
+`Qwen/Qwen3-Embedding-0.6B` (1024 dims), `-4B` (2560), `-8B` (4096).
+the lane is a ladder like the llm one: configured rungs are tried in
+order and a failing rung is walked past, so the invalid gemini key
+never blocks real vectors. `RETELLDB_EMBED_MODEL` overrides the model,
+`RETELLDB_EMBEDDER` pins a rung (gemini, featherless, openai, closed).
+
+vectors live on nodes and on artifact chunks, so a vector hit still
+resolves to original lines. cosine across mismatched dims reads 0: a
+model switch degrades to lexical instead of ranking nonsense.
+
+backboard, though it has memory of its own, exposes no embeddings
+endpoint. its memory is deliberately not used: scope rules and
+provenance are ours to enforce.
