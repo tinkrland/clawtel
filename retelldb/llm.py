@@ -6,6 +6,7 @@ inventing an answer."""
 
 import json
 import os
+import urllib.error
 import urllib.request
 
 
@@ -14,45 +15,68 @@ def _env(name, default=None):
     return v.strip() if isinstance(v, str) and v.strip() else default
 
 
-def resolve_provider():
-    """explicit config wins; then known keys; then closed."""
+def resolve_providers():
+    """the ladder: custom, then every known key set. a dead rail is
+    walked past at call time, not trusted because it exists."""
+    out = []
     base = _env("RETELLDB_LLM_BASE_URL")
     key = _env("RETELLDB_LLM_API_KEY")
     model = _env("RETELLDB_LLM_MODEL")
     if base and key:
-        return {"base_url": base.rstrip("/"), "key": key, "model": model or "glm-4-7-flash", "name": "custom"}
+        out.append({"base_url": base.rstrip("/"), "key": key, "model": model or "glm-4-7-flash", "name": "custom"})
     if _env("TENSORMUX_TOKEN"):
-        return {
+        out.append({
             "base_url": "https://api.tensormux.com/v1",
             "key": _env("TENSORMUX_TOKEN"),
             "model": model or "glm-4-7-flash",
             "name": "tensormux",
-        }
-    if _env("FEATHERLESS_API_KEY"):
-        return {
+        })
+    # featherless: more than one key may exist and only some carry an
+    # active subscription, so the lane holds every candidate key and
+    # walks to the next one when a key is refused. the default model is
+    # ungated: llama and friends are gated per organization until HF is
+    # connected, qwen is not.
+    featherless_keys = [k for k in (_env("FEATHERLESS_API_KEY_2"), _env("FEATHERLESS_API_KEY")) if k]
+    if featherless_keys:
+        out.append({
             "base_url": "https://api.featherless.ai/v1",
-            "key": _env("FEATHERLESS_API_KEY"),
-            "model": model or "meta-llama/Llama-3.3-70B-Instruct",
+            "key": featherless_keys[0],
+            "keys": featherless_keys,
+            "model": model or "Qwen/Qwen2.5-72B-Instruct",
             "name": "featherless",
-        }
+        })
     if _env("OPENAI_API_KEY"):
-        return {
+        out.append({
             "base_url": _env("OPENAI_BASE_URL") or "https://api.openai.com/v1",
             "key": _env("OPENAI_API_KEY"),
             "model": model or "gpt-4.1-mini",
             "name": "openai",
-        }
-    return None
+        })
+    return out
+
+
+def resolve_provider():
+    """the first rung, for status and for callers that want one."""
+    ladder = resolve_providers()
+    return ladder[0] if ladder else None
 
 
 class LlmClient:
     """thin /chat/completions client with native tool support."""
 
     def __init__(self, provider="auto"):
-        # "auto" resolves from the environment; an explicit None (or a
-        # provider dict) is exactly what the caller asked for. a closed
-        # lane must be possible to ask for on purpose.
-        self.provider = resolve_provider() if provider == "auto" else provider
+        # "auto" resolves the ladder from the environment; an explicit
+        # None (or a provider dict) is exactly what the caller asked
+        # for. a closed lane must be possible to ask for on purpose.
+        if provider == "auto":
+            self.providers = resolve_providers()
+            self.provider = self.providers[0] if self.providers else None
+        elif isinstance(provider, list):
+            self.providers = provider
+            self.provider = provider[0] if provider else None
+        else:
+            self.providers = [provider] if provider else []
+            self.provider = provider
 
     @property
     def available(self):
@@ -79,20 +103,51 @@ class LlmClient:
         if tools:
             payload["tools"] = tools
             payload["tool_choice"] = "auto"
-        req = urllib.request.Request(
-            self.provider["base_url"] + "/chat/completions",
-            data=json.dumps(payload).encode(),
-            headers={
-                "content-type": "application/json",
-                "authorization": "Bearer " + self.provider["key"],
-            },
-        )
-        try:
-            with urllib.request.urlopen(req, timeout=90) as res:
-                body = json.loads(res.read().decode())
-        except Exception as err:
-            note_llm_call(False, f"{type(err).__name__}: {err}")
-            raise
+        headers = {
+            "content-type": "application/json",
+            # several providers sit behind a cloudflare wall that 403s
+            # tool-shaped default agents, so the lane identifies itself
+            "user-agent": "Mozilla/5.0 (compatible; clawtel-retelldb/1.0)",
+        }
+        body = None
+        last_err = None
+        served_by = None
+        for provider in (self.providers or [self.provider]):
+            payload["model"] = provider["model"]
+            for candidate in provider.get("keys") or [provider["key"]]:
+                headers["authorization"] = "Bearer " + candidate
+                req = urllib.request.Request(
+                    provider["base_url"] + "/chat/completions",
+                    data=json.dumps(payload).encode(),
+                    headers=headers,
+                )
+                try:
+                    with urllib.request.urlopen(req, timeout=90) as res:
+                        body = json.loads(res.read().decode())
+                    provider["key"] = candidate
+                    served_by = provider
+                    break
+                except urllib.error.HTTPError as err:
+                    # 401/402/403: this rung cannot serve (no
+                    # subscription, spent credits, rejected key). walk
+                    # to the next key, then the next provider.
+                    if err.code in (401, 402, 403, 404):
+                        last_err = err
+                        continue
+                    note_llm_call(False, f"{type(err).__name__}: {err}")
+                    raise
+            if body is not None:
+                break
+        if served_by is not None:
+            self.provider = served_by
+            # status names the rung that actually served, not the first
+            # one that merely has keys
+            LLM_HEALTH["served_by"] = served_by["name"] + ":" + served_by["model"]
+        if body is None and self.provider is not None and last_err is None:
+            pass
+        if body is None:
+            note_llm_call(False, f"{type(last_err).__name__ if last_err else 'RuntimeError'}: {last_err or 'no key could serve'}")
+            raise last_err or RuntimeError("no provider key could serve")
         note_llm_call(True)
         choice = (body.get("choices") or [{}])[0]
         message = choice.get("message") or {}
@@ -103,7 +158,7 @@ class LlmClient:
         }
 
 
-LLM_HEALTH = {"calls": 0, "ok_calls": 0, "last_error": None}
+LLM_HEALTH = {"calls": 0, "ok_calls": 0, "last_error": None, "served_by": None}
 
 
 def note_llm_call(ok: bool, error: str = "") -> None:
