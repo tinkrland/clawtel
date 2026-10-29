@@ -11,6 +11,7 @@ import { resolveJoinUrl } from "./meetings/joining/resolver.ts";
 import { closeMeetingBrowser, joinMeeting, leaveMeeting } from "./meetings/joining/engine.ts";
 import { getMeeting, listMeetings, transitionMeeting } from "./meetings/meeting.ts";
 import { answerForCall } from "./meetings/voice/answer.ts";
+import { renderedLine, say, speakingLane } from "./meetings/voice/say.ts";
 import { normalizeReaction, reactionExpression, reactionOutcome } from "./meetings/interactivity/reactions.ts";
 import { decideHand, handExpression, handOutcome } from "./meetings/interactivity/hand.ts";
 import { screensharerExpression, screensharerFromExpression, sharerFromViewerText } from "./meetings/interactivity/screensharer.ts";
@@ -143,6 +144,38 @@ app.post("/api/meetings/:id/ask", async (c) => {
   if (!answer.ok) return c.json(answer, 503);
   return c.json(answer);
 });
+
+app.post("/api/meetings/:id/say", async (c) => {
+  const meeting = getMeeting(c.req.param("id"));
+  if (!meeting) return c.json({ error: "no such meeting on the books" }, 404);
+  const body = await c.req.json().catch(() => null);
+  if (!body?.question && !body?.text) return c.json({ error: "say needs a question or a line" }, 400);
+  const out = await say(meeting, {
+    personaId: PERSONA_ID,
+    memory,
+    question: body?.question ? String(body.question) : undefined,
+    text: body?.text ? String(body.text) : undefined,
+    connectionId: body?.connection_id ?? null,
+    maxSteps: Number(body?.max_steps) || undefined,
+    play: body?.play !== false,
+  });
+  if (!out.ok) return c.json(out, 503);
+  return c.json(out);
+});
+
+app.get("/api/voice/audio/:id", async (c) => {
+  const line = renderedLine(c.req.param("id"));
+  if (!line) return c.json({ error: "no such rendered line" }, 404);
+  const { readFile } = await import("node:fs/promises");
+  try {
+    const buf = await readFile(line.path);
+    return c.body(new Uint8Array(buf), 200, { "content-type": line.mime });
+  } catch {
+    return c.json({ error: "the rendered line is gone from disk" }, 410);
+  }
+});
+
+app.get("/api/voice/lane", async (c) => c.json(await speakingLane()));
 
 app.post("/api/meetings/:id/join", async (c) => {
   try {

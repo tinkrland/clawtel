@@ -26,7 +26,7 @@ const DEBUG_PORT = 9222;
 // included. the documented pattern, not a workaround guess.
 const SHIM_PORT = 9333;
 
-function chromeLaunchCommand(autoSelectScreen: boolean): string {
+export function chromeLaunchCommand(autoSelectScreen: boolean, pulseServer?: string): string {
   const flags = [
     "--no-sandbox",
     "--disable-dev-shm-usage",
@@ -44,11 +44,21 @@ function chromeLaunchCommand(autoSelectScreen: boolean): string {
     // the verified agent-drive path: getdisplaymedia without a picker
     flags.push('--auto-select-desktop-capture-source="Entire screen"');
   }
-  return `nohup env DISPLAY=:0 google-chrome ${flags.join(" ")} about:blank >/tmp/chrome.log 2>&1 & sleep 1`;
+  // the join tab needs the room mic, not the container default: pulse
+  // source points chrome at the remap source the speaking lane plays into
+  // the room mic: chrome needs both the sink it should read and the
+  // server to ask. a container whose daemon never served has no server
+  // passed, and the tab still joins, it just cannot be heard
+  const pulse = pulseServer
+    ? `PULSE_SERVER=${pulseServer} PULSE_SOURCE=clawtel_source `
+    : "PULSE_SOURCE=clawtel_source ";
+  return `nohup env DISPLAY=:0 ${pulse}google-chrome ${flags.join(" ")} about:blank >/tmp/chrome.log 2>&1 & sleep 1`;
 }
 
 export class SpawnableBrowserLane implements BrowserLane {
   readonly lane = "spawnable";
+  // honest receipt: did this join get a microphone
+  lastMic: { ok: boolean; server?: string; rung?: string; reason?: string } | null = null;
   private browserSpec = {
     name: "",
     form: "dock" as const,
@@ -95,7 +105,13 @@ export class SpawnableBrowserLane implements BrowserLane {
       throw new Error(`the cdp shim did not come up: ${shim.stderr.slice(0, 200)}`);
     }
 
-    const launch = await tenkiProvider.exec(name, chromeLaunchCommand(opts.autoSelectScreen === true), 30_000);
+    // the mic before the tab: chrome reads PULSE_SOURCE at launch, so
+    // the sink has to exist first. a container without pulseaudio still
+    // joins and shares, it just cannot be heard
+    const mic = await tenkiProvider.provisionMic(name);
+    this.lastMic = mic;
+
+    const launch = await tenkiProvider.exec(name, chromeLaunchCommand(opts.autoSelectScreen === true, mic.server), 30_000);
     if (launch.exitCode !== 0) {
       throw new Error(`chrome did not launch: ${launch.stderr.slice(0, 200)}`);
     }

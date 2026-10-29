@@ -92,6 +92,8 @@ plus every ts test green.
 
 | voice layer (mid-call answers, speakable lines, receipts beside them) | verified | live oct 29 2026 through /api/meetings/:id/ask: a zoom meeting with a stored transcript answered "how long for a digital course" with seven days, the exception to the fourteen-day rule, sources at 0:01:05 and 0:02:44, no ids in the spoken line. two live bugs found and fixed: NaN pointers from unvalidated segments, and a model hedging between a rule and its exception |
 
+| speaking lane (tts + room mic) | mixed | container: verified live, the whole trip through /api/meetings/:id/say: answered, rendered by edge-tts (49,104 bytes, 8.2s), played into the null sink, captured back from the monitor at peak 16457. spawnable: the daemon binds its socket but never serves a client (user mode refuses, system mode queues and ignores), so provisionMic probes and reports ok:false rather than claiming a mic. open seam: a serving pulseaudio or pipewire in the spawnable image |
+
 ## honest gaps
 
 - the memory service has no auth beyond an optional api key and no

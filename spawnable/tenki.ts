@@ -128,6 +128,46 @@ export class TenkiProvider implements SpawnableProvider {
     }
   }
 
+  /**
+   * the speaking seam: pulseaudio inside the spawnable, a null sink and
+   * a remap source, so a rendered line played into the sink is what the
+   * join tab hears as its microphone. idempotent, and honest when the
+   * container has no pulseaudio: the desktop still works, speaking does
+   * not.
+   */
+  async provisionMic(name: string): Promise<{ ok: boolean; server?: string; rung?: string; reason?: string }> {
+    const script = [
+      "set -u",
+      "command -v pulseaudio >/dev/null || sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq pulseaudio pulseaudio-utils >/tmp/mic-apt.log 2>&1 || { echo rung=apt-failed; exit 0; }",
+      "sudo pkill -x pulseaudio 2>/dev/null || true",
+      "sleep 1",
+      "export XDG_RUNTIME_DIR=/tmp/pulse",
+      "mkdir -p /tmp/pulse && chmod 700 /tmp/pulse",
+      "setsid pulseaudio -n --exit-idle-time=-1 --load=module-native-protocol-unix --load='module-null-sink sink_name=clawtel_mic sink_properties=device.description=clawtel_mic' --load='module-remap-source master=clawtel_mic.monitor source_name=clawtel_source source_properties=device.description=clawtel_mic' </dev/null >/tmp/pulse-user.log 2>&1 &",
+      "sleep 4",
+      "if PULSE_SERVER=unix:/tmp/pulse/pulse/native timeout 6 pactl info >/tmp/probe-user.txt 2>&1; then echo rung=user; echo server=unix:/tmp/pulse/pulse/native; echo sources=$(PULSE_SERVER=unix:/tmp/pulse/pulse/native pactl list short sources | grep -c clawtel_source); exit 0; fi",
+      "sudo pkill -x pulseaudio 2>/dev/null || true",
+      "sleep 1",
+      "sudo nohup pulseaudio --system -n --disallow-exit --exit-idle-time=-1 --load='module-native-protocol-unix auth-anonymous=1 socket=/tmp/pulse-system' --load='module-null-sink sink_name=clawtel_mic' --load='module-remap-source master=clawtel_mic.monitor source_name=clawtel_source' --log-target=file:/tmp/pulse-sys.log </dev/null >/dev/null 2>&1 &",
+      "sleep 4",
+      "if PULSE_SERVER=unix:/tmp/pulse-system timeout 6 pactl info >/tmp/probe-sys.txt 2>&1; then echo rung=system; echo server=unix:/tmp/pulse-system; echo sources=$(PULSE_SERVER=unix:/tmp/pulse-system pactl list short sources | grep -c clawtel_source); exit 0; fi",
+      "echo rung=none",
+      "echo user_err=$(tail -1 /tmp/probe-user.txt 2>/dev/null | tr ' ' '_')",
+      "echo sys_err=$(tail -1 /tmp/probe-sys.txt 2>/dev/null | tr ' ' '_')",
+    ].join("\n");
+    const res = await this.exec(name, script, 180_000);
+    const field = (k: string) =>
+      res.stdout.split("\n").find((l) => l.startsWith(`${k}=`))?.slice(k.length + 1).trim() ?? "";
+    const rung = field("rung");
+    if ((rung === "user" || rung === "system") && field("sources") !== "0") {
+      return { ok: true, server: field("server"), rung };
+    }
+    const why = rung === "apt-failed"
+      ? "apt could not install pulseaudio"
+      : `the daemon never served a client (${field("user_err") || "user rung"} / ${field("sys_err") || "system rung"})`;
+    return { ok: false, rung: rung || "none", reason: why };
+  }
+
   /** expose a port through the tenki tunnel; the preview url reaches it from outside. */
   async exposePort(name: string, port: number): Promise<{ port: number; previewUrl: string }> {
     const session = await this.requireSession(name);
