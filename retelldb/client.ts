@@ -147,7 +147,40 @@ export class RetelldbClient {
     }
   }
 
-  async status(): Promise<MemoryResult<{ nodes: number; artifacts: number; persistence: string }>> {
+  /** the tool-calling agent: it decides what to look up, we execute, it cites. */
+  async answer(
+    question: string,
+    scope: MemoryScope,
+    opts: { maxSteps?: number } = {},
+  ): Promise<MemoryResult<unknown>> {
+    if (!this.isAvailable()) {
+      return { ok: false, reason: "the memory lane is closed: RETELLDB_URL is unset" };
+    }
+    try {
+      const res = await fetch(`${this.baseUrl!.replace(/\/$/, "")}/v1/answer`, {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          ...(this.apiKey ? { "x-api-key": this.apiKey } : {}),
+        },
+        body: JSON.stringify({ question, scope, max_steps: opts.maxSteps }),
+      });
+      const body = (await res.json().catch(() => null)) as { ok?: boolean; error?: string } | null;
+      // a refusal with a reason is the agent's honest answer, not a
+      // transport failure: it passes through intact
+      if (body && body.ok === false && body.error) {
+        return { ok: true, data: body };
+      }
+      if (!res.ok) {
+        return { ok: false, reason: body?.error ?? `the service said ${res.status}` };
+      }
+      return { ok: true, data: body };
+    } catch (err) {
+      return { ok: false, reason: `the memory service did not answer: ${(err as Error).message}` };
+    }
+  }
+
+  async status(): Promise<MemoryResult<{ nodes: number; artifacts: number; persistence: string; lanes?: Record<string, unknown> }>> {
     if (!this.isAvailable()) {
       return { ok: false, reason: "the memory lane is closed: RETELLDB_URL is unset" };
     }

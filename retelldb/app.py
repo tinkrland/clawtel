@@ -7,7 +7,8 @@ endpoints:
   POST /v1/ground     {query, scope, limit?}   the pre-call brief
   POST /v1/tools      {name, args, scope}      the mid-call tools
   GET  /v1/tools                            the catalog
-  GET  /v1/status     ?persona_id
+  POST /v1/answer     {question, scope, max_steps?}  the tool-calling agent
+  GET  /v1/status     ?persona_id   (lanes report open or closed, honestly)
 
 fail-closed: RETELLDB_API_KEY set means the key is required on every
 /v1 call. the clawtel server is the only caller, and it sends one.
@@ -27,13 +28,20 @@ from urllib.parse import urlparse, parse_qs
 try:
     from .store import Store
     from .scope import filter_nodes
+    from .agent import answer_question
+    from .embedder import embedder_status, get_embedder
     from .grounding import build_brief, meet_brief_lines
+    from .llm import llm_status
     from .tools import call_tool, tool_catalog
 except ImportError:  # pragma: no cover - script mode
     sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
     from retelldb.store import Store
     from retelldb.scope import filter_nodes
+    from retelldb.agent import answer_question
+    from retelldb.embedder import embedder_status, get_embedder
     from retelldb.grounding import build_brief, meet_brief_lines
+    from retelldb.llm import llm_status
+    from retelldb.tools import call_tool, tool_catalog
     from retelldb.tools import call_tool, tool_catalog
 
 
@@ -44,6 +52,7 @@ def store() -> Store:
     global STORE
     if STORE is None:
         STORE = Store(os.environ.get("RETELLDB_DATA") or None)
+        STORE.embedder = get_embedder()
     return STORE
 
 
@@ -55,6 +64,7 @@ def _handle_ingest(payload: dict) -> tuple[int, dict]:
     node_ids = []
     artifact_ids = []
 
+    embed_fn = store().embedder.embed if store().embedder is not None and store().embedder.available else None
     for art in payload.get("artifacts") or []:
         if not art.get("name") or art.get("content") is None:
             return 400, {"error": "an artifact needs name and content. nothing is invented."}
@@ -67,6 +77,7 @@ def _handle_ingest(payload: dict) -> tuple[int, dict]:
             platform=art.get("platform", scope.get("platform")),
             tags=art.get("tags", []),
             source_uri=art.get("source_uri"),
+            embed_fn=embed_fn,
         )
         artifact_ids.append(artifact.id)
         created_artifacts += 1 if created else 0
@@ -93,6 +104,7 @@ def _handle_ingest(payload: dict) -> tuple[int, dict]:
             sensitivity=node.get("sensitivity", "normal"),
             artifact_id=node_artifact_id,
             pointer=node.get("pointer"),
+            embed_fn=embed_fn,
         )
         node_ids.append(created_node.id)
         created_nodes += 1 if created else 0
@@ -116,7 +128,7 @@ def _handle_query(payload: dict) -> tuple[int, dict]:
     persona_id = scope.get("persona_id")
     candidates = store().list_nodes(persona_id=persona_id)
     kept, dropped = filter_nodes(candidates, scope)
-    scored = store().search(query, kept, limit=int(payload.get("limit") or 8))
+    scored, mode = store().search_fused(query, kept, limit=int(payload.get("limit") or 8))
     return 200, {
         "enabled": True,
         "nodes": [
@@ -133,8 +145,22 @@ def _handle_query(payload: dict) -> tuple[int, dict]:
             for n, s in scored
         ],
         "dropped": dropped,
-        "retrieval": "lexical",
+        "retrieval": mode,
     }
+
+
+def _handle_answer(payload: dict) -> tuple[int, dict]:
+    scope = payload.get("scope") or {}
+    if not scope.get("platform"):
+        return 400, {"error": "an answer needs a declared platform"}
+    result = answer_question(
+        payload.get("question") or "",
+        scope,
+        store(),
+        max_steps=int(payload.get("max_steps") or 4),
+        protocol=payload.get("protocol") or "auto",
+    )
+    return (200 if result.get("ok") else 503), result
 
 
 def _handle_ground(payload: dict) -> tuple[int, dict]:
@@ -193,6 +219,11 @@ class Handler(BaseHTTPRequestHandler):
                     "nodes": len(store().list_nodes(persona_id=persona_id)),
                     "artifacts": len(store().list_artifacts(persona_id=persona_id)),
                     "persistence": "json file" if os.environ.get("RETELLDB_DATA") else "memory only",
+                    "lanes": {
+                        "retrieval": store().retrieval_mode(),
+                        "embedder": embedder_status(),
+                        "llm": llm_status(),
+                    },
                 },
             )
         return self._send(404, {"error": f"no route {parsed.path}"})
@@ -211,6 +242,7 @@ class Handler(BaseHTTPRequestHandler):
             "/v1/ingest": _handle_ingest,
             "/v1/query": _handle_query,
             "/v1/ground": _handle_ground,
+            "/v1/answer": _handle_answer,
             "/v1/tools": _handle_tools,
         }
         handler = routes.get(parsed.path)

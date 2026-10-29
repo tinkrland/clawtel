@@ -110,6 +110,15 @@ def _artifact_carry(pseudo, scope: dict) -> tuple:
     return carry(pseudo, scope)  # type: ignore[arg-type]
 
 
+def citation_for(node) -> str:
+    """the receipt for a node: the original's pointer when there is one."""
+    if node.artifact_id and node.pointer:
+        return f"{node.artifact_id}@{node.pointer}"
+    if node.pointer:
+        return str(node.pointer)
+    return f"memory:{node.id}"
+
+
 def tool_search_memory(store: Store, scope: dict, args: dict) -> dict:
     query = args.get("query")
     if not query:
@@ -117,13 +126,21 @@ def tool_search_memory(store: Store, scope: dict, args: dict) -> dict:
     limit = int(args.get("limit") or 8)
     candidates = store.list_nodes(persona_id=scope.get("persona_id"))
     kept, dropped = filter_nodes(candidates, scope)
-    scored = store.search(query, kept, limit=limit)
+    scored, mode = store.search_fused(query, kept, limit=limit)
     return {
         "ok": True,
         "result": [
-            {"node_id": n.id, "type": n.type, "text": n.text, "score": round(s, 4)}
+            {
+                "node_id": n.id,
+                "type": n.type,
+                "text": n.text,
+                "citation": citation_for(n),
+                "score": round(s, 4),
+            }
             for n, s in scored
         ],
+        "citations": [citation_for(n) for n, _ in scored],
+        "retrieval": mode,
         "provenance": {"dropped": dropped},
     }
 
@@ -172,6 +189,49 @@ def tool_find_in_artifact(store: Store, scope: dict, args: dict) -> dict:
         "provenance": _provenance(art, {"hits": len(hits)}),
     }
 
+
+TOOL_SPECS: Dict[str, dict] = {
+    "search_memory": {
+        "description": "search the speaker's memory for facts, preferences, events. returns cited nodes.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "query": {"type": "string", "description": "what to look for"},
+                "limit": {"type": "integer", "description": "max hits, default 8"},
+            },
+            "required": ["query"],
+        },
+    },
+    "get_artifact": {
+        "description": "return the ORIGINAL file verbatim, whole or an exact line or character span.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "artifact_id": {"type": "string"},
+                "line_from": {"type": "integer"},
+                "line_to": {"type": "integer"},
+                "start": {"type": "integer"},
+                "end": {"type": "integer"},
+            },
+            "required": ["artifact_id"],
+        },
+    },
+    "find_in_artifact": {
+        "description": "find an exact phrase inside one original file. returns lines with citations.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "artifact_id": {"type": "string"},
+                "phrase": {"type": "string"},
+            },
+            "required": ["artifact_id", "phrase"],
+        },
+    },
+    "list_artifacts": {
+        "description": "list the original files this scope can open.",
+        "parameters": {"type": "object", "properties": {}},
+    },
+}
 
 TOOLS: Dict[str, Callable[[Store, dict, dict], dict]] = {
     "get_artifact": tool_get_artifact,

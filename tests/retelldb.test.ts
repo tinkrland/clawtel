@@ -43,10 +43,13 @@ before(async () => {
   process.env.CLAWTEL_API_TOKEN = TOKEN;
   process.env.RETELLDB_URL = `http://127.0.0.1:${PORT}`;
   process.env.CLAWTEL_PERSONA_ID = "test-persona";
-  service = spawn("python3", ["retelldb/app.py"], {
-    env: { ...process.env, PORT: String(PORT) },
-    stdio: "ignore",
-  });
+  // provider keys are stripped on purpose: the test runs the closed
+  // lanes (a real model call costs money and proves nothing here)
+  const env: NodeJS.ProcessEnv = { ...process.env, PORT: String(PORT) };
+  for (const k of ["FEATHERLESS_API_KEY", "FEATHERLESS_API_KEY_2", "TENSORMUX_TOKEN", "OPENAI_API_KEY", "GEMINIAPIKEY", "RETELLDB_LLM_BASE_URL", "RETELLDB_EMBED_BASE_URL"]) {
+    delete env[k];
+  }
+  service = spawn("python3", ["retelldb/app.py"], { env, stdio: "ignore" });
   await waitHealthy(`http://127.0.0.1:${PORT}`);
   // import AFTER the env is set: the client reads it at construction
   const mod = await import("../server.ts");
@@ -158,4 +161,32 @@ test("scope walls hold through the api: unanchored session, public surface", asy
 test("memory routes refuse an undeclared platform", async () => {
   const res = await call("POST", "/api/memory/ground", { query: "anything" });
   assert.equal(res.status, 400);
+});
+
+test("the answer route is honest about a closed model lane", async () => {
+  const res = await call("POST", "/api/memory/answer", {
+    question: "what is the refund window?",
+    platform: "zoom",
+  });
+  assert.equal(res.status, 503);
+  const body = (await res.json()) as { enabled?: boolean; error?: string; reason?: string };
+  assert.equal(body.enabled, false);
+  assert.match(String(body.error ?? body.reason), /closed/i);
+});
+
+test("the answer route refuses an undeclared platform", async () => {
+  const res = await call("POST", "/api/memory/answer", {
+    question: "what is the refund window?",
+  });
+  assert.equal(res.status, 400);
+});
+
+test("status names the lanes honestly", async () => {
+  const res = await call("GET", "/api/memory/status");
+  assert.equal(res.status, 200);
+  const body = (await res.json()) as { enabled: boolean; lanes?: { embedder?: { available: boolean }; llm?: { available: boolean } } };
+  assert.equal(body.enabled, true);
+  // with every provider key stripped, both lanes must say closed
+  assert.equal(body.lanes?.embedder?.available, false);
+  assert.equal(body.lanes?.llm?.available, false);
 });

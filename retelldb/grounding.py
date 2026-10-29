@@ -56,7 +56,7 @@ def build_brief(
     persona_id = scope.get("persona_id")
     candidates = store.list_nodes(persona_id=persona_id)
     kept, dropped = filter_nodes(candidates, scope)
-    scored = store.search(query, kept, limit=limit)
+    scored, mode = store.search_fused(query, kept, limit=limit)
 
     lines = []
     artifact_ids = []
@@ -87,7 +87,7 @@ def build_brief(
 
     return {
         "enabled": True,
-        "retrieval": "lexical",
+        "retrieval": mode,
         "brief": lines,
         "artifacts": artifacts,
         "dropped": dropped,

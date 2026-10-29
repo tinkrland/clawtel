@@ -19,6 +19,8 @@ import json
 import os
 import re
 from dataclasses import dataclass, field, asdict
+
+from .embedder import cosine
 from typing import Any, Dict, List, Optional
 
 NODE_TYPES = ("fact", "preference", "relationship", "event", "skill", "entity")
@@ -44,6 +46,9 @@ class Node:
     artifact_id: Optional[str] = None
     pointer: Optional[str] = None  # e.g. "0:01:05" transcript time, "L12" line
     created_at: str = ""
+    # the semantic vector, present only when the embedder lane is open.
+    # absent = not embedded, and retrieval says so instead of guessing.
+    embedding: Optional[List[float]] = None
 
 
 @dataclass
@@ -58,12 +63,47 @@ class Artifact:
     tags: List[str] = field(default_factory=list)
     source_uri: Optional[str] = None
     ingested_at: str = ""
+    # line-window chunks of the ORIGINAL, each with a line pointer and
+    # (when the lane is open) its own vector. this is how mid-call
+    # lookup lands on the exact lines, not a summary.
+    chunks: List[Dict[str, Any]] = field(default_factory=list)
 
 
 def _now() -> str:
     from datetime import datetime, timezone
 
     return datetime.now(timezone.utc).isoformat()
+
+
+# a vector hit below this cosine is noise, not a memory: dropped rather
+# than dressed up as relevance. the number is a floor, not a claim.
+MIN_COS = 0.2
+CHUNK_LINES = 40
+CHUNK_OVERLAP = 10
+
+
+def _chunk_lines(content: str) -> List[Dict[str, Any]]:
+    """windows of the ORIGINAL, each carrying its 1-based start line."""
+    lines = (content or "").splitlines()
+    if not lines:
+        return []
+    chunks: List[Dict[str, Any]] = []
+    step = max(1, CHUNK_LINES - CHUNK_OVERLAP)
+    for start in range(0, len(lines), step):
+        window = lines[start : start + CHUNK_LINES]
+        if not window:
+            break
+        chunks.append(
+            {
+                "index": len(chunks),
+                "start_line": start + 1,
+                "end_line": start + len(window),
+                "text": "\n".join(window),
+            }
+        )
+        if start + CHUNK_LINES >= len(lines):
+            break
+    return chunks
 
 
 def tokens(text: str) -> List[str]:
@@ -77,6 +117,8 @@ class Store:
         self.path = path
         self.nodes: Dict[str, Node] = {}
         self.artifacts: Dict[str, Artifact] = {}
+        # wired by the app from get_embedder(); None = lexical only
+        self.embedder = None
         if path and os.path.exists(path):
             self._load()
 
@@ -88,9 +130,12 @@ class Store:
         type: str,
         key: str,
         text: str,
+        embed_fn: Any = None,
         **kwargs: Any,
     ) -> tuple[Node, bool]:
-        """returns (node, created). deterministic id = idempotent re-ingest."""
+        """returns (node, created). deterministic id = idempotent re-ingest.
+        embed_fn (the embedder's embed) stamps the vector when the lane is
+        open; a node whose text did not change keeps its existing vector."""
         if type not in NODE_TYPES:
             raise ValueError(f"unknown node type {type}. one of {NODE_TYPES} or nothing.")
         nid = stable_id(persona_id, type, key)
@@ -115,7 +160,15 @@ class Store:
             ),
             pointer=kwargs.get("pointer", existing.pointer if existing else None),
             created_at=existing.created_at if existing else _now(),
+            embedding=existing.embedding if existing else None,
         )
+        if embed_fn is not None and text and (
+            not existing or existing.text != text or not existing.embedding
+        ):
+            try:
+                node.embedding = embed_fn([text])[0]
+            except Exception:
+                node.embedding = None  # the lane was open but failed: no vector, no lie
         self.nodes[nid] = node
         self._persist()
         return node, created
@@ -135,6 +188,7 @@ class Store:
         self,
         name: str,
         content: str,
+        embed_fn: Any = None,
         **kwargs: Any,
     ) -> tuple[Artifact, bool]:
         aid = stable_id("artifact", name, content[:200])
@@ -150,7 +204,15 @@ class Store:
             tags=kwargs.get("tags", []),
             source_uri=kwargs.get("source_uri"),
             ingested_at=_now(),
+            chunks=_chunk_lines(content),
         )
+        if embed_fn is not None and self.artifacts[aid].chunks:
+            try:
+                vectors = embed_fn([c["text"] for c in self.artifacts[aid].chunks])
+                for chunk, vec in zip(self.artifacts[aid].chunks, vectors):
+                    chunk["embedding"] = vec
+            except Exception:
+                pass  # chunks stay unembedded; lexical lookup still works
         self._persist()
         return self.artifacts[aid], created
 
@@ -187,6 +249,80 @@ class Store:
             scored.append((node, score))
         scored.sort(key=lambda pair: (-pair[1], pair[0].id))
         return scored[:limit]
+
+    # --- vector retrieval: the lane that needs the embedder open ---
+
+    def search_vector(
+        self, query_vec: List[float], candidates: List[Node], limit: int = 8
+    ) -> List[tuple[Node, float]]:
+        scored: List[tuple[Node, float]] = []
+        for node in candidates:
+            if not node.embedding:
+                continue
+            score = cosine(query_vec, node.embedding)
+            if score >= MIN_COS:
+                scored.append((node, score))
+        scored.sort(key=lambda pair: (-pair[1], pair[0].id))
+        return scored[:limit]
+
+    def search_chunks(
+        self, query_vec: List[float], limit: int = 5
+    ) -> List[tuple[Artifact, Dict[str, Any], float]]:
+        scored: List[tuple[Artifact, Dict[str, Any], float]] = []
+        for art in self.artifacts.values():
+            for chunk in art.chunks or []:
+                if not chunk.get("embedding"):
+                    continue
+                score = cosine(query_vec, chunk["embedding"])
+                if score >= MIN_COS:
+                    scored.append((art, chunk, score))
+        scored.sort(key=lambda t: (-t[2], t[0].id, t[1].get("index", 0)))
+        return scored[:limit]
+
+    # --- fused retrieval: lexical when alone, lexical + vector when open ---
+
+    def retrieval_mode(self) -> str:
+        """fused means vectors actually exist in the store. a configured
+        key that never produced a vector is lexical in practice, and
+        that is what the label must say."""
+        try:
+            if self.embedder is None or not self.embedder.available:
+                return "lexical"
+            has_vectors = any(n.embedding for n in self.nodes.values()) or any(
+                c.get("embedding") for a in self.artifacts.values() for c in (a.chunks or [])
+            )
+            return "fused" if has_vectors else "lexical"
+        except Exception:
+            return "lexical"
+
+    def query_vector(self, query: str):
+        if self.embedder is None:
+            return None
+        try:
+            return self.embedder.embed([query])[0]
+        except Exception:
+            return None  # provider failed mid-flight: lexical answers, honestly
+
+    def search_fused(self, query: str, candidates: List[Node], limit: int = 8):
+        """return (scored pairs, mode). lexical and vector fuse when both fire."""
+        lex = self.search(query, candidates, limit=limit * 2)
+        if self.retrieval_mode() != "fused":
+            return lex[:limit], "lexical"
+        vec_q = self.query_vector(query)
+        if vec_q is None:
+            return lex[:limit], "lexical"
+        vec = self.search_vector(vec_q, candidates, limit=limit * 2)
+        if not vec:
+            return lex[:limit], "lexical"
+        max_lex = max([s for _, s in lex], default=1.0) or 1.0
+        fused: Dict[str, tuple] = {}
+        for node, score in lex:
+            fused[node.id] = (node, 0.6 * (score / max_lex))
+        for node, score in vec:
+            prev = fused.get(node.id)
+            fused[node.id] = (node, (prev[1] if prev else 0.0) + 0.4 * score)
+        ranked = sorted(fused.values(), key=lambda pair: (-pair[1], pair[0].id))
+        return ranked[:limit], "fused"
 
     # --- persistence ---
 

@@ -393,6 +393,25 @@ app.post("/api/relay/capture-email", async (c) => {
 
 // --- memory (the retelldb layer) ---
 
+app.post("/api/memory/answer", async (c) => {
+  const body = await c.req.json().catch(() => null);
+  if (!body?.question) return c.json({ error: "an answer needs a question" }, 400);
+  if (!body?.platform) return c.json({ error: "an answer needs a declared platform" }, 400);
+  const result = await memory.answer(
+    body.question,
+    {
+      persona_id: body.persona_id ?? PERSONA_ID,
+      platform: body.platform,
+      connection_id: body.connection_id ?? null,
+    },
+    { maxSteps: Number(body.max_steps) || undefined },
+  );
+  if (!result.ok) return c.json({ enabled: false, reason: result.reason }, 503);
+  const data = result.data as { ok?: boolean; error?: string };
+  if (data.ok === false) return c.json({ ...data, enabled: false }, 503);
+  return c.json(data);
+});
+
 app.get("/api/memory/status", async (c) => {
   const result = await memory.status();
   if (!result.ok) return c.json({ enabled: false, reason: result.reason }, 200);
