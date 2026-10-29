@@ -5,7 +5,8 @@
   "scripts": {
     "check": "tsc -p tsconfig.json",
     "test": "node --import tsx --test tests/",
-    "start": "tsx server.ts"
+    "start": "tsx server.ts",
+    "test:memory": "python3 retelldb/test_service.py"
   },
   "dependencies": {
     "@hono/node-server": "^2.1.5",

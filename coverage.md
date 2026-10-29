@@ -68,7 +68,35 @@ closed). 71 tests + typecheck green, live smoke oct 27 2026.
 | calendar intake lanes (google, microsoft, apple, notion, cal.com, zcal) | designed | closed-lane contracts in intake/planner.ts; bring credentials |
 | spawnable routes through the api | verified | GET /api/spawnables reports lane truth; tenki lane live-smoked oct 27 |
 
+## memory (the retelldb layer)
+
+the memory data plane is python (stdlib only, http), the control plane
+stays typescript. 29 python tests + 4 integration tests over real http,
+plus every ts test green.
+
+| capability | state | evidence |
+| --- | --- | --- |
+| store: typed nodes + verbatim artifacts, deterministic ids | verified | retelldb/test_service.py: idempotent re-ingest upserts in place, artifact ids content stable, json persistence survives reload |
+| scope gates (fail-closed: unknown surface, persona isolation, anchor match, meeting wall, sensitivity) | verified | retelldb/scope.py + tests: anchored node stays home in an unanchored session, private email note does not ride into a meeting, public social material does not ride into a meeting, another persona never leaks |
+| real data hooks (meeting planned, capture heard, transcript stored) | verified | server.ts hooks + integration test: a real meeting, capture and transcript land in memory, status reflects them |
+| grounding brief (pre-call scan, citation on every line, prompt line for a live agent) | verified | /v1/ground + /api/memory/ground: the refund question grounds to its transcript line at 0:01:05 |
+| tools (mid-call): get_artifact original + exact line/char spans, find_in_artifact, search_memory, list_artifacts | verified | /v1/tools + integration test: the ORIGINAL transcript text comes back verbatim, an exact line span is exact, an unknown tool is refused with the registry |
+| client (env-gated, fail-closed, refusal passthrough) | verified | retelldb/client.ts: unset url = closed with a reason, a failure is null memory never a guess, a tool refusal reaches the caller intact |
+| lexical retrieval lane | verified | deterministic token match; the brief says "lexical", never claims semantic |
+| embedder lane | verified | live oct 29 2026: featherless serves embeddings (Qwen3-Embedding-0.6B/4B/8B at /v1/embeddings, 1024/2560/4096 dims, key 2 + browser ua). the embedder is a ladder too: it walks past the dead gemini key and serves from featherless. fused retrieval proven on a paraphrase with no shared keywords ("how long do buyers have to ask for their money back" returns the refund facts). backboard exposes no embeddings endpoint. cosine across mismatched dims reads 0, so switching models degrades honestly instead of ranking nonsense |
+| llm tool-calling (a model choosing tools mid-call) | verified | live oct 29 2026: featherless Qwen2.5-72B picked search_memory natively, answered the digital-goods refund case correctly, cited both transcript pointers (artifact@0:02:44 and @0:01:05). provider ladder walks past dead rungs (tensormux credits expired, featherless key 1 unsubscribed) to the one that serves, and status names the serving rung |
+| backboard rung (threads, runs, run-scoped tool outputs) | verified | live oct 29 2026: BACKBOARD_TOKEN works (X-API-Key, gpt-4o-mini default, OpenAI-style tools). a message answers REQUIRES_ACTION with run_id; outputs go to /threads/{id}/runs/{run}/submit-tool-outputs. pitfall found live: the completed reply echoes its tool_calls, so only a REQUIRES_ACTION turn is actionable (ungated, the agent re-ran the same tool to the step budget). pinned with RETELLDB_LLM_PROVIDER=backboard; agent answered the digital-refund case in 2 steps with both citations |
+| retrieval fusion | verified | fused means vectors actually exist, never that a key does; a configured-but-failing embedder reads lexical (live-verified oct 29 2026: configured true, healthy false, HTTP 400, brief still answers) |
+| lane health receipts | verified | embedder/llm status carries configured, healthy, calls, last_error: a configured key is not a working one, and a failed call is visible instead of implied (live-verified: the 402 and the HTTP 400 both surface with the provider named) |
+| langflow as a visual layer | decided against as a dependency | flows live in its db as json, its own server + ui would ship twice, behavior that matters stays in code with tests; mcp-shaped tool surface lets it plug in locally if wanted |
+
 ## honest gaps
+
+- the memory service has no auth beyond an optional api key and no
+  transport encryption of its own: it sits behind the clawtel api door
+  on the same host, and a remote deployment needs tls in front.
+
+
 
 - the browser lane is live (a browser inside a dock, cdp through the
   tunnel) but the platform join page seams are not: zoom needs its web
