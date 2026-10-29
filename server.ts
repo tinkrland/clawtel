@@ -10,6 +10,7 @@ import { planFromEvent, meetingFromResolved } from "./intake/planner.ts";
 import { resolveJoinUrl } from "./meetings/joining/resolver.ts";
 import { closeMeetingBrowser, joinMeeting, leaveMeeting } from "./meetings/joining/engine.ts";
 import { getMeeting, listMeetings, transitionMeeting } from "./meetings/meeting.ts";
+import { answerForCall } from "./meetings/voice/answer.ts";
 import { normalizeReaction, reactionExpression, reactionOutcome } from "./meetings/interactivity/reactions.ts";
 import { decideHand, handExpression, handOutcome } from "./meetings/interactivity/hand.ts";
 import { screensharerExpression, screensharerFromExpression, sharerFromViewerText } from "./meetings/interactivity/screensharer.ts";
@@ -125,6 +126,22 @@ app.post("/api/meetings", async (c) => {
     { platform: meeting.platform },
   );
   return c.json({ meeting }, 201);
+});
+
+app.post("/api/meetings/:id/ask", async (c) => {
+  const meeting = getMeeting(c.req.param("id"));
+  if (!meeting) return c.json({ error: "no such meeting on the books" }, 404);
+  const body = await c.req.json().catch(() => null);
+  const question = body?.question;
+  if (!question) return c.json({ error: "an answer needs a question" }, 400);
+  const answer = await answerForCall(meeting, String(question), {
+    personaId: PERSONA_ID,
+    memory,
+    connectionId: body?.connection_id ?? null,
+    maxSteps: Number(body?.max_steps) || undefined,
+  });
+  if (!answer.ok) return c.json(answer, 503);
+  return c.json(answer);
 });
 
 app.post("/api/meetings/:id/join", async (c) => {
@@ -277,8 +294,21 @@ app.post("/api/captures/:id/redeem", (c) => {
 
 app.post("/api/transcripts", async (c) => {
   const body = await c.req.json().catch(() => null);
-  const segments: TranscriptSegment[] = Array.isArray(body?.segments) ? body.segments : [];
-  if (!segments.length) return c.json({ error: "a transcript needs segments" }, 400);
+  const raw = Array.isArray(body?.segments) ? body.segments : [];
+  if (!raw.length) return c.json({ error: "a transcript needs segments" }, 400);
+  // a segment with no numeric start would become a NaN pointer, and a
+  // citation that cannot point at a time is worse than a refusal
+  const segments: TranscriptSegment[] = [];
+  for (const seg of raw) {
+    const startMs = Number(seg?.startMs ?? seg?.start_ms);
+    if (!Number.isFinite(startMs) || typeof seg?.text !== "string" || !seg.text.trim()) {
+      return c.json(
+        { error: "every segment needs a numeric start (startMs or start_ms), a speaker and text" },
+        400,
+      );
+    }
+    segments.push({ startMs, speaker: String(seg?.speaker ?? "guest"), text: seg.text });
+  }
   const transcript = storeTranscript(segments, { meetingId: body.meeting_id, sourceUrl: body.source_url });
   const meeting = body.meeting_id ? getMeeting(body.meeting_id) : undefined;
   const platform = meeting?.platform ?? "zoom";

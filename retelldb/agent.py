@@ -24,6 +24,12 @@ rules:
 - cite every claim: use the citation the tool returned (for example artifact@0:01:05 or L14). a claim without a citation is not allowed.
 - if the tools return nothing relevant, say plainly that nothing in memory says that, and do not guess.
 - keep it short and spoken-friendly: one to three sentences.
+- when a general rule and a specific exception both appear, the exception
+  governs the specific case: say which applies instead of hedging between
+  both, and cite the deciding fact.
+- do not print ids, hashes or pointers in the prose (no L14, no
+  artifact@...): the citations list carries them, and the spoken line
+  should not. the tool returns them; you do not speak them.
 - never invent names, numbers, prices, dates or promises."""
 
 JSON_PROTOCOL_NOTE = """

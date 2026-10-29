@@ -90,6 +90,8 @@ plus every ts test green.
 | lane health receipts | verified | embedder/llm status carries configured, healthy, calls, last_error: a configured key is not a working one, and a failed call is visible instead of implied (live-verified: the 402 and the HTTP 400 both surface with the provider named) |
 | langflow as a visual layer | decided against as a dependency | flows live in its db as json, its own server + ui would ship twice, behavior that matters stays in code with tests; mcp-shaped tool surface lets it plug in locally if wanted |
 
+| voice layer (mid-call answers, speakable lines, receipts beside them) | verified | live oct 29 2026 through /api/meetings/:id/ask: a zoom meeting with a stored transcript answered "how long for a digital course" with seven days, the exception to the fourteen-day rule, sources at 0:01:05 and 0:02:44, no ids in the spoken line. two live bugs found and fixed: NaN pointers from unvalidated segments, and a model hedging between a rule and its exception |
+
 ## honest gaps
 
 - the memory service has no auth beyond an optional api key and no
