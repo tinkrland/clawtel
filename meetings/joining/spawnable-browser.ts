@@ -26,7 +26,7 @@ const DEBUG_PORT = 9222;
 // included. the documented pattern, not a workaround guess.
 const SHIM_PORT = 9333;
 
-export function chromeLaunchCommand(autoSelectScreen: boolean, pulseServer?: string): string {
+export function chromeLaunchCommand(autoSelectScreen: boolean, mic?: { server: string; source: string; dbus?: string } | null): string {
   const flags = [
     "--no-sandbox",
     "--disable-dev-shm-usage",
@@ -46,13 +46,13 @@ export function chromeLaunchCommand(autoSelectScreen: boolean, pulseServer?: str
   }
   // the join tab needs the room mic, not the container default: pulse
   // source points chrome at the remap source the speaking lane plays into
-  // the room mic: chrome needs both the sink it should read and the
-  // server to ask. a container whose daemon never served has no server
-  // passed, and the tab still joins, it just cannot be heard
-  const pulse = pulseServer
-    ? `PULSE_SERVER=${pulseServer} PULSE_SOURCE=clawtel_source `
-    : "PULSE_SOURCE=clawtel_source ";
-  return `nohup env DISPLAY=:0 ${pulse}google-chrome ${flags.join(" ")} about:blank >/tmp/chrome.log 2>&1 & sleep 1`;
+  // the room mic: pipewire's pulse server plus the monitor source, and
+  // the session bus wireplumber needs to keep routing. a box whose mic
+  // never came up passes nothing, joins, and cannot be heard
+  const micEnv = mic?.server
+    ? `PULSE_SERVER=${mic.server} PULSE_SOURCE=${mic.source} XDG_RUNTIME_DIR=/tmp/pwrun ${mic.dbus ? `DBUS_SESSION_BUS_ADDRESS=${mic.dbus} ` : ""}`
+    : "";
+  return `nohup env DISPLAY=:0 ${micEnv}google-chrome ${flags.join(" ")} about:blank >/tmp/chrome.log 2>&1 & sleep 1`;
 }
 
 export class SpawnableBrowserLane implements BrowserLane {
@@ -111,7 +111,7 @@ export class SpawnableBrowserLane implements BrowserLane {
     const mic = await tenkiProvider.provisionMic(name);
     this.lastMic = mic;
 
-    const launch = await tenkiProvider.exec(name, chromeLaunchCommand(opts.autoSelectScreen === true, mic.server), 30_000);
+    const launch = await tenkiProvider.exec(name, chromeLaunchCommand(opts.autoSelectScreen === true, mic.ok ? mic : null), 30_000);
     if (launch.exitCode !== 0) {
       throw new Error(`chrome did not launch: ${launch.stderr.slice(0, 200)}`);
     }

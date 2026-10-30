@@ -12,6 +12,7 @@ import { closeMeetingBrowser, joinMeeting, leaveMeeting } from "./meetings/joini
 import { getMeeting, listMeetings, transitionMeeting } from "./meetings/meeting.ts";
 import { answerForCall } from "./meetings/voice/answer.ts";
 import { renderedLine, say, speakingLane } from "./meetings/voice/say.ts";
+import { tenkiProvider } from "./spawnable/manager.ts";
 import { normalizeReaction, reactionExpression, reactionOutcome } from "./meetings/interactivity/reactions.ts";
 import { decideHand, handExpression, handOutcome } from "./meetings/interactivity/hand.ts";
 import { screensharerExpression, screensharerFromExpression, sharerFromViewerText } from "./meetings/interactivity/screensharer.ts";
@@ -150,6 +151,22 @@ app.post("/api/meetings/:id/say", async (c) => {
   if (!meeting) return c.json({ error: "no such meeting on the books" }, 404);
   const body = await c.req.json().catch(() => null);
   if (!body?.question && !body?.text) return c.json({ error: "say needs a question or a line" }, 400);
+  // a meeting joined in a spawnable is heard there, not here: the line
+  // travels into the box and plays through the sink its tab reads
+  const session = meeting.sessionId ?? "";
+  const inBox = session.startsWith("spawnable:") ? session.slice("spawnable:".length) : "";
+  let player: ((path: string) => Promise<{ ok: boolean; reason?: string }>) | undefined;
+  if (inBox && body?.play !== false) {
+    const mic = await tenkiProvider.provisionMic(inBox);
+    if (!mic.ok) {
+      return c.json({ ok: false, reason: `this box has no microphone: ${mic.reason}` }, 503);
+    }
+    player = async (path: string) => {
+      const heard = await tenkiProvider.speakInBox(inBox, mic, path);
+      return { ok: heard.ok, reason: heard.reason };
+    };
+  }
+
   const out = await say(meeting, {
     personaId: PERSONA_ID,
     memory,
@@ -158,6 +175,7 @@ app.post("/api/meetings/:id/say", async (c) => {
     connectionId: body?.connection_id ?? null,
     maxSteps: Number(body?.max_steps) || undefined,
     play: body?.play !== false,
+    player,
   });
   if (!out.ok) return c.json(out, 503);
   return c.json(out);

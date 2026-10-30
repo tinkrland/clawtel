@@ -20,6 +20,7 @@ import type {
   SpawnableSpec,
   SpawnableStatus,
 } from "./types.ts";
+import type { MicTarget } from "../meetings/voice/mic.ts";
 
 const decoder = new TextDecoder();
 
@@ -135,37 +136,120 @@ export class TenkiProvider implements SpawnableProvider {
    * container has no pulseaudio: the desktop still works, speaking does
    * not.
    */
-  async provisionMic(name: string): Promise<{ ok: boolean; server?: string; rung?: string; reason?: string }> {
+  /**
+   * the room mic, the recipe that actually works in this image.
+   *
+   * two sessions of guessing said pulseaudio: it starts, binds its
+   * socket and then never serves a client, because it wants a session
+   * bus that a spawnable does not have. pipewire can serve pulse
+   * clients, but only with wireplumber on a real session bus. so: a
+   * long lived dbus at a fixed path, pipewire, wireplumber,
+   * pipewire-pulse, a null sink, and then a tone round trip that proves
+   * audio physically moves before this reports ok.
+   */
+  async provisionMic(name: string): Promise<MicTarget & { ok: boolean; rung?: string; reason?: string }> {
     const script = [
       "set -u",
-      "command -v pulseaudio >/dev/null || sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq pulseaudio pulseaudio-utils >/tmp/mic-apt.log 2>&1 || { echo rung=apt-failed; exit 0; }",
-      "sudo pkill -x pulseaudio 2>/dev/null || true",
+      "command -v pipewire >/dev/null && command -v pactl >/dev/null && command -v paplay >/dev/null && command -v parec >/dev/null && command -v ffmpeg >/dev/null || sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq pipewire pipewire-pulse wireplumber dbus dbus-x11 pulseaudio-utils ffmpeg >/tmp/mic-apt.log 2>&1 || { echo rung=apt-failed; exit 0; }",
+      "export XDG_RUNTIME_DIR=/tmp/pwrun; export PULSE_SERVER=unix:/tmp/pwrun/pulse/native; mkdir -p $XDG_RUNTIME_DIR; chmod 700 $XDG_RUNTIME_DIR",
+      "[ -S /tmp/clawtel-dbus ] || dbus-daemon --session --fork --address=unix:path=/tmp/clawtel-dbus >/dev/null 2>&1 || true",
+      "export DBUS_SESSION_BUS_ADDRESS=unix:path=/tmp/clawtel-dbus",
+      "pactl info >/dev/null 2>&1 || {",
+      "  pgrep -x pipewire >/dev/null || setsid pipewire </dev/null >/tmp/pw.log 2>&1 &",
+      "  sleep 1",
+      "  pgrep -x wireplumber >/dev/null || setsid wireplumber </dev/null >/tmp/wp.log 2>&1 &",
+      "  sleep 2",
+      "  pgrep -x pipewire-pulse >/dev/null || setsid pipewire-pulse </dev/null >/tmp/pwp.log 2>&1 &",
+      "  sleep 3",
+      "}",
+      "pactl info >/dev/null 2>&1 && echo pactl=ok || { echo pactl=fail; exit 0; }",
+      "pactl list short sinks | grep -q clawtel_mic || pactl load-module module-null-sink sink_name=clawtel_mic sink_properties=device.description=clawtel_mic >/dev/null 2>&1",
+      "pactl list short sources | grep -q clawtel_mic.monitor && echo source=clawtel_mic.monitor || echo source=none",
+      "python3 - <<'PY'",
+      "import math, struct, wave",
+      "w = wave.open('/tmp/probe-tone.wav','w'); w.setnchannels(2); w.setsampwidth(2); w.setframerate(48000)",
+      "w.writeframes(b''.join(struct.pack('<hh', int(12000*math.sin(2*math.pi*440*i/48000)), int(12000*math.sin(2*math.pi*440*i/48000))) for i in range(96000)))",
+      "w.close()",
+      "PY",
+      "(timeout 6 parec --device=clawtel_mic.monitor --format=s16le --rate=48000 --channels=2 >/tmp/probe-cap.raw 2>/dev/null &)",
       "sleep 1",
-      "export XDG_RUNTIME_DIR=/tmp/pulse",
-      "mkdir -p /tmp/pulse && chmod 700 /tmp/pulse",
-      "setsid pulseaudio -n --exit-idle-time=-1 --load=module-native-protocol-unix --load='module-null-sink sink_name=clawtel_mic sink_properties=device.description=clawtel_mic' --load='module-remap-source master=clawtel_mic.monitor source_name=clawtel_source source_properties=device.description=clawtel_mic' </dev/null >/tmp/pulse-user.log 2>&1 &",
-      "sleep 4",
-      "if PULSE_SERVER=unix:/tmp/pulse/pulse/native timeout 6 pactl info >/tmp/probe-user.txt 2>&1; then echo rung=user; echo server=unix:/tmp/pulse/pulse/native; echo sources=$(PULSE_SERVER=unix:/tmp/pulse/pulse/native pactl list short sources | grep -c clawtel_source); exit 0; fi",
-      "sudo pkill -x pulseaudio 2>/dev/null || true",
-      "sleep 1",
-      "sudo nohup pulseaudio --system -n --disallow-exit --exit-idle-time=-1 --load='module-native-protocol-unix auth-anonymous=1 socket=/tmp/pulse-system' --load='module-null-sink sink_name=clawtel_mic' --load='module-remap-source master=clawtel_mic.monitor source_name=clawtel_source' --log-target=file:/tmp/pulse-sys.log </dev/null >/dev/null 2>&1 &",
-      "sleep 4",
-      "if PULSE_SERVER=unix:/tmp/pulse-system timeout 6 pactl info >/tmp/probe-sys.txt 2>&1; then echo rung=system; echo server=unix:/tmp/pulse-system; echo sources=$(PULSE_SERVER=unix:/tmp/pulse-system pactl list short sources | grep -c clawtel_source); exit 0; fi",
-      "echo rung=none",
-      "echo user_err=$(tail -1 /tmp/probe-user.txt 2>/dev/null | tr ' ' '_')",
-      "echo sys_err=$(tail -1 /tmp/probe-sys.txt 2>/dev/null | tr ' ' '_')",
+      "paplay --device=clawtel_mic /tmp/probe-tone.wav >/tmp/probe-play.log 2>&1 || true",
+      "sleep 2",
+      "sleep 1; echo tone_peak=$(python3 -c \"import struct;d=open('/tmp/probe-cap.raw','rb').read();n=len(d)//2;s=struct.unpack('<%dh'%n,d) if n else (0,);print(max(abs(x) for x in s))\")",
+      "echo dbus=$([ -S /tmp/clawtel-dbus ] && echo unix:path=/tmp/clawtel-dbus || echo none)",
     ].join("\n");
-    const res = await this.exec(name, script, 180_000);
+
+    const res = await this.exec(name, script, 240_000);
     const field = (k: string) =>
       res.stdout.split("\n").find((l) => l.startsWith(`${k}=`))?.slice(k.length + 1).trim() ?? "";
-    const rung = field("rung");
-    if ((rung === "user" || rung === "system") && field("sources") !== "0") {
-      return { ok: true, server: field("server"), rung };
+    const target: MicTarget = {
+      server: "unix:/tmp/pwrun/pulse/native",
+      sink: "clawtel_mic",
+      source: field("source") === "none" ? "" : "clawtel_mic.monitor",
+      dbus: field("dbus") === "none" ? "" : field("dbus"),
+    };
+    const peak = Number(field("tone_peak") || 0);
+
+    if (field("pactl") === "ok" && target.source && peak > 1000) {
+      return { ok: true, rung: "pipewire", ...target };
     }
-    const why = rung === "apt-failed"
-      ? "apt could not install pulseaudio"
-      : `the daemon never served a client (${field("user_err") || "user rung"} / ${field("sys_err") || "system rung"})`;
-    return { ok: false, rung: rung || "none", reason: why };
+    const why = field("rung") === "apt-failed"
+      ? "apt could not install pipewire"
+      : field("pactl") !== "ok"
+        ? "pipewire-pulse never answered pactl"
+        : !target.source
+          ? "the null sink monitor never appeared as a source"
+          : `a tone round trip captured peak ${peak}, which is silence`;
+    return { ok: false, rung: "none", reason: why, ...target };
+  }
+
+  /**
+   * speak a rendered line inside the box, where the meeting hears it.
+   *
+   * the audio is written into the box (the file has to travel: paplay
+   * there cannot read our filesystem), converted if needed, and played
+   * into the sink the join tab reads. the monitor capture is the
+   * receipt: a peak above silence proves the room actually got audio,
+   * not that a command exited zero.
+   */
+  async speakInBox(
+    name: string,
+    target: MicTarget,
+    audioPath: string,
+    verify = true,
+  ): Promise<{ ok: boolean; peak?: number; reason?: string }> {
+    const session = await this.requireSession(name);
+    const { readFile } = await import("node:fs/promises");
+    const bytes = await readFile(audioPath);
+    // the sdk refuses writes outside the box workdir, so the line lands
+    // next to the user's home rather than in /tmp
+    const remote = "/home/tenki/clawtel-line" + (audioPath.match(/\.[a-z0-9]+$/i)?.[0] ?? ".mp3");
+    await session.writeFile(remote, new Uint8Array(bytes));
+
+    const env = [
+      `PULSE_SERVER=${target.server}`,
+      target.dbus ? `DBUS_SESSION_BUS_ADDRESS=${target.dbus}` : "",
+      "XDG_RUNTIME_DIR=/tmp/pwrun",
+    ].filter(Boolean).join(" ");
+    const wav = "/home/tenki/clawtel-line.wav";
+    const play = `ffmpeg -v error -y -i ${remote} -ar 48000 -ac 2 ${wav} && ${env} paplay --device ${target.sink} ${wav}`;
+
+    const script = verify
+      ? `set -u; (${env} timeout 8 parec --device=${target.source} --format=s16le --rate=48000 --channels=2 >/tmp/clawtel-cap.raw 2>/dev/null &); sleep 1; ${play} >/tmp/clawtel-play.log 2>&1; echo play=$?; sleep 1; echo peak=$(python3 -c "import struct;d=open('/tmp/clawtel-cap.raw','rb').read();n=len(d)//2;s=struct.unpack('<%dh'%n,d) if n else (0,);print(max(abs(x) for x in s))" 2>/dev/null || echo 0)`
+      : `set -u; ${play} >/tmp/clawtel-play.log 2>&1; echo play=$?`;
+
+    const res = await this.exec(name, script, 120_000);
+    const field = (k: string) =>
+      res.stdout.split("\n").find((l) => l.startsWith(`${k}=`))?.slice(k.length + 1).trim() ?? "";
+    const playCode = field("play");
+    const peak = Number(field("peak") || 0);
+    if (playCode !== "0") {
+      return { ok: false, reason: `paplay exited ${playCode || "unknown"} in the box` };
+    }
+    if (verify && peak <= 1000) {
+      return { ok: false, peak, reason: "the line played but the monitor captured silence" };
+    }
+    return { ok: true, peak };
   }
 
   /** expose a port through the tenki tunnel; the preview url reaches it from outside. */

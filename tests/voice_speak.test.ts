@@ -129,38 +129,76 @@ test("a rendered line that cannot be played says so, and still counts as rendere
 test("the join tab launches pointed at the room mic", async () => {
   const { chromeLaunchCommand } = await import("../meetings/joining/spawnable-browser.ts");
   const cmd = chromeLaunchCommand(false);
-  assert.match(cmd, /PULSE_SOURCE=clawtel_source/);
+  // no mic passed: no audio env at all, the tab joins deaf
+  assert.equal(cmd.includes("PULSE_SOURCE"), false);
   assert.match(cmd, /DISPLAY=:0/);
   assert.equal(cmd.includes("auto-select-desktop-capture-source"), false);
   assert.match(chromeLaunchCommand(true), /auto-select-desktop-capture-source/);
-  assert.match(chromeLaunchCommand(false, "unix:/tmp/pulse-system"), /PULSE_SERVER=unix:\/tmp\/pulse-system/);
+  const withMic = chromeLaunchCommand(false, {
+    server: "unix:/tmp/pwrun/pulse/native",
+    source: "clawtel_mic.monitor",
+    dbus: "unix:path=/tmp/clawtel-dbus",
+  });
+  assert.match(withMic, /PULSE_SERVER=unix:\/tmp\/pwrun\/pulse\/native/);
+  assert.match(withMic, /PULSE_SOURCE=clawtel_mic\.monitor/);
+  assert.match(withMic, /DBUS_SESSION_BUS_ADDRESS=unix:path=\/tmp\/clawtel-dbus/);
   assert.equal(chromeLaunchCommand(false).includes("PULSE_SERVER"), false);
 });
 
-test("provisionMic claims a mic only when the daemon served a client", async () => {
+test("provisionMic claims a mic only after a tone round trip carries audio", async () => {
   const { TenkiProvider } = await import("../spawnable/tenki.ts");
   const provider = new TenkiProvider();
   const stub = (stdout: string) => {
     (provider as unknown as { exec: unknown }).exec = async () => ({ exitCode: 0, stdout, stderr: "" });
     return provider;
   };
-  const served = await stub("rung=user\nserver=unix:/tmp/pulse/pulse/native\nsources=1\n").provisionMic("box");
+  const served = await stub(
+    "pactl=ok\nsource=clawtel_mic.monitor\ntone_peak=12000\ndbus=unix:path=/tmp/clawtel-dbus\n",
+  ).provisionMic("box");
   assert.equal(served.ok, true);
-  assert.equal(served.server, "unix:/tmp/pulse/pulse/native");
+  assert.equal(served.rung, "pipewire");
+  assert.equal(served.source, "clawtel_mic.monitor");
+  assert.equal(served.dbus, "unix:path=/tmp/clawtel-dbus");
 
-  const silent = await stub("rung=none\nuser_err=Connection_refused\nsys_err=Timeout\n").provisionMic("box");
+  const silent = await stub("pactl=ok\nsource=clawtel_mic.monitor\ntone_peak=0\ndbus=none\n").provisionMic("box");
   assert.equal(silent.ok, false);
-  assert.equal(silent.rung, "none");
-  assert.match(silent.reason ?? "", /never served a client/);
-  assert.match(silent.reason ?? "", /Connection_refused/);
+  assert.match(silent.reason ?? "", /silence/);
+
+  const noServer = await stub("pactl=fail\n").provisionMic("box");
+  assert.equal(noServer.ok, false);
+  assert.match(noServer.reason ?? "", /never answered pactl/);
+
+  const noMonitor = await stub("pactl=ok\nsource=none\ntone_peak=12000\ndbus=none\n").provisionMic("box");
+  assert.equal(noMonitor.ok, false);
+  assert.match(noMonitor.reason ?? "", /monitor/);
 });
 
-test("a socket without the remap source is not a microphone", async () => {
+test("speakInBox writes the line into the box and proves it was heard", async () => {
   const { TenkiProvider } = await import("../spawnable/tenki.ts");
+  const { writeFile } = await import("node:fs/promises");
+  const linePath = "/tmp/clawtel-test-line.mp3";
+  await writeFile(linePath, Buffer.alloc(32, 1));
+
   const provider = new TenkiProvider();
-  (provider as unknown as { exec: unknown }).exec = async () => ({
-    exitCode: 0, stdout: "rung=system\nserver=unix:/tmp/pulse-system\nsources=0\n", stderr: "",
+  let wrote = "";
+  (provider as unknown as { requireSession: unknown }).requireSession = async () => ({
+    writeFile: async (path: string) => { wrote = path; },
   });
-  const out = await provider.provisionMic("box");
-  assert.equal(out.ok, false);
+
+  const mic = { server: "unix:/tmp/pwrun/pulse/native", sink: "clawtel_mic", source: "clawtel_mic.monitor", dbus: "unix:path=/tmp/clawtel-dbus" };
+  (provider as unknown as { exec: unknown }).exec = async () => ({ exitCode: 0, stdout: "play=0\npeak=13785\n", stderr: "" });
+  const heard = await provider.speakInBox("box", mic, linePath);
+  assert.equal(heard.ok, true);
+  assert.equal(heard.peak, 13785);
+  assert.match(wrote, /^\/home\/tenki\/clawtel-line/);
+
+  (provider as unknown as { exec: unknown }).exec = async () => ({ exitCode: 0, stdout: "play=0\npeak=0\n", stderr: "" });
+  const silent = await provider.speakInBox("box", mic, linePath);
+  assert.equal(silent.ok, false);
+  assert.match(silent.reason ?? "", /silence/);
+
+  (provider as unknown as { exec: unknown }).exec = async () => ({ exitCode: 0, stdout: "play=2\npeak=0\n", stderr: "" });
+  const failed = await provider.speakInBox("box", mic, linePath);
+  assert.equal(failed.ok, false);
+  assert.match(failed.reason ?? "", /exited 2/);
 });

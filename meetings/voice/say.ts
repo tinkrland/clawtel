@@ -8,7 +8,7 @@
 
 import { randomUUID } from "node:crypto";
 import { answerForCall, type AskOptions, type VoiceAnswer } from "./answer.ts";
-import { playIntoMic, micStatus, type Exec } from "./mic.ts";
+import { playIntoMic, micStatus, type Exec, type MicTarget } from "./mic.ts";
 import { synthesize, type SpeakOptions, type TtsResult } from "./tts.ts";
 import type { Meeting } from "../meeting.ts";
 
@@ -42,6 +42,10 @@ export interface SayOptions extends AskOptions {
   tts?: SpeakOptions;
   exec?: Exec;
   play?: boolean;
+  // where the line is spoken. absent means this process, which is the
+  // container case; a joined spawnable supplies its own box
+  target?: MicTarget | null;
+  player?: (audioPath: string) => Promise<{ ok: boolean; reason?: string }>;
 }
 
 export async function say(meeting: Meeting, opts: SayOptions): Promise<SayResult> {
@@ -90,7 +94,9 @@ export async function say(meeting: Meeting, opts: SayOptions): Promise<SayResult
 
   if (opts.play === false) return { ...result, ok: true };
 
-  const played = await playIntoMic(tts.path, opts.exec);
+  const played = opts.player
+    ? await opts.player(tts.path)
+    : await playIntoMic(tts.path, opts.exec, opts.target);
   return { ...result, ok: true, played };
 }
 

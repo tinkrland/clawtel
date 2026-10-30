@@ -13,6 +13,14 @@ import { spawn } from "node:child_process";
 export const SINK = "clawtel_mic";
 export const SOURCE = "clawtel_source";
 
+/** where a remote box keeps its room mic. empty fields mean absent. */
+export interface MicTarget {
+  server: string;
+  sink: string;
+  source: string;
+  dbus?: string;
+}
+
 export interface MicStatus {
   ok: boolean;
   sink: string | null;
@@ -20,11 +28,18 @@ export interface MicStatus {
   reason?: string;
 }
 
-export type Exec = (cmd: string, args: string[]) => Promise<{ code: number; out: string }>;
+export type Exec = (
+  cmd: string,
+  args: string[],
+  env?: Record<string, string>,
+) => Promise<{ code: number; out: string }>;
 
-export const shellExec: Exec = (cmd, args) =>
+export const shellExec: Exec = (cmd, args, env) =>
   new Promise((resolve) => {
-    const child = spawn(cmd, args, { stdio: ["ignore", "pipe", "pipe"] });
+    const child = spawn(cmd, args, {
+      stdio: ["ignore", "pipe", "pipe"],
+      env: env ? { ...process.env, ...env } : process.env,
+    });
     let out = "";
     child.stdout.on("data", (d) => { out += String(d); });
     child.stderr.on("data", (d) => { out += String(d); });
@@ -64,19 +79,34 @@ export async function ensureMic(exec: Exec = shellExec): Promise<MicStatus> {
   return micStatus(exec);
 }
 
+/** the env a client needs to reach a given box's audio server. */
+export function micEnv(target?: MicTarget | null): Record<string, string> {
+  // the local container answers on the default socket with no env at all
+  if (!target || !target.server) return {};
+  const env: Record<string, string> = { PULSE_SERVER: target.server };
+  if (target.dbus) env.DBUS_SESSION_BUS_ADDRESS = target.dbus;
+  if (target.server.includes("/tmp/pwrun")) env.XDG_RUNTIME_DIR = "/tmp/pwrun";
+  return env;
+}
+
 /** speak a rendered line into the sink. mp3 is converted first. */
 export async function playIntoMic(
   audioPath: string,
   exec: Exec = shellExec,
+  target?: MicTarget | null,
 ): Promise<{ ok: boolean; reason?: string }> {
-  const status = await ensureMic(exec);
-  if (!status.ok) return { ok: false, reason: status.reason };
+  const env = micEnv(target);
+  // a remote box owns its own sink: probing it locally would be a lie
+  if (!target?.server) {
+    const status = await ensureMic(exec);
+    if (!status.ok) return { ok: false, reason: status.reason };
+  }
 
   const wav = audioPath.replace(/\.(mp3|m4a|opus|webm)$/i, ".wav");
   const conv = await exec("ffmpeg", ["-v", "error", "-y", "-i", audioPath, "-ar", "48000", "-ac", "2", wav]);
   if (conv.code !== 0) return { ok: false, reason: "the line could not be converted to wav" };
 
-  const played = await exec("paplay", ["--device", SINK, wav]);
+  const played = await exec("paplay", ["--device", target?.sink ?? SINK, wav], env);
   return played.code === 0 ? { ok: true } : { ok: false, reason: "paplay could not speak the line" };
 }
 
