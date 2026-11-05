@@ -50,11 +50,37 @@ and says so. a night with no demo in the current segment answers 409.
 guest admission reports hold, not an error, because a waiting room is a
 normal state and the human decides next.
 
+## the host seat
+
+`platforms/zoom-host.ts` holds the selectors and expressions; the seat
+is a host's hand in the web client: admit one person from the waiting
+room, mute or remove one participant, start and stop sharing.
+
+the pack is marked unverified, and that is not modesty: zoom changes
+client builds and a selector written from memory is a guess. so every
+act probes the page first, and when the DOM disagrees the answer is a
+sentence naming what was missing, not a click on whatever sat next to
+the old selector. an ambiguous name is refused rather than guessed at,
+because admitting the wrong person cannot be undone by an apology.
+
+sharing skips the probe on purpose: sharing hides the panels the probe
+looks for, so a share is judged by its own control instead.
+
+`scripts/host-seat-check.ts` runs all of this against real chromium and
+a fixture that behaves like the client: menus open on click, the share
+control becomes a sharing bar, admits and removals change the DOM. nine
+checks, all green. what that proves is the expressions and the selection
+logic. what it does not prove is that the selectors fit zoom's current
+build: only a real meeting settles that, and the probe route exists so
+the first live run starts with an answer instead of a guess.
+
 ## what is not built
 
-- joining a meeting as host with host powers (admit, mute, remove,
-  screen share) needs a platform module; the seam exists and is closed.
+- selectors verified against a live zoom client. the probe reports which
+  controls matched, so this is one meeting away.
+- meet and teams host powers: the route answers 501 naming the platform
+  rather than pretending.
 - publishing to lu.ma, or anywhere, stays with the human on purpose.
-- a live hosted night has not been run yet. the demo lane has run
-  against a browser session in tests with a fake driver, and the real
-  driver is the same shape the join lane already uses.
+- a live hosted night has not been run yet. the demo lane runs against a
+  fake driver in tests and the browser-session driver in code; the host
+  seat runs against a fixture in real chromium.

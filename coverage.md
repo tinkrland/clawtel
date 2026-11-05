@@ -96,6 +96,8 @@ plus every ts test green.
 
 | hosting surface (agent runs the night: agenda, clock, browser demo, listing, guest door) | built, not live-run | agenda validated at the desk (welcome first, close last, demos need a runnable script and 2+ minutes), demo runner with per-step timed receipts (a falsy check or a blank screenshot fails the step), deterministic session clock (lobby/live/paused/closed, pause holds remaining minutes), admission policy defaulting to ask with blocked always refused, listing rendered from the agenda and never published, lu.ma payload as copy to paste (no documented event-creation api). 22 hosting tests plus 6 route tests. not live-run: a hosted night with real guests, and host powers (admit/mute/share) which need a platform module and report closed |
 
+| host seat (admit, mute, remove, share in the meeting tab) | built, selectors unverified live | platforms/zoom-host.ts selector pack (marked unverified) + expressions; BrowserHostControls probes before every act, refuses on ambiguity, and skips the probe only for share (sharing hides the panels). scripts/host-seat-check.ts green in real chromium against a client-shaped fixture: 9 checks (probe finds both panels, admit lands on the right row, mute and remove open the menu first, share becomes a sharing bar, stop lands, unknown name refused by name, mismatched pack refuses instead of clicking blind). routes POST /api/hostings/:id/controls/{probe,admit,mute,remove,share,unshare} answer 400 on shape, 501 for non-zoom, 503 with the lane closed, 409 on a selector mismatch. NOT verified: the selectors against a live zoom build, and admit/mute/remove in a real meeting |
+
 ## honest gaps
 
 - the memory service has no auth beyond an optional api key and no

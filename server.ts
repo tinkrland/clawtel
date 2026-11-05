@@ -16,6 +16,7 @@ import { tenkiProvider } from "./spawnable/manager.ts";
 import { renderEventDraft, luMaPayload } from "./hosting/listing.ts";
 import { decideAdmission, shareForSegment } from "./hosting/controls.ts";
 import { runDemo } from "./hosting/demo.ts";
+import { BrowserHostControls } from "./hosting/platforms/browser-controls.ts";
 import { createHostingSession, getHosting, listHostings, putHosting } from "./hosting/store.ts";
 import { advanceHosting, admitGuest, backHosting, closeHosting, currentSegment, pauseHosting, remainingMs, resumeHosting, startHosting, tickHosting } from "./hosting/session.ts";
 import { normalizeReaction, reactionExpression, reactionOutcome } from "./meetings/interactivity/reactions.ts";
@@ -185,6 +186,62 @@ for (const [action, apply] of [
     return c.json({ hosting: next, segment: currentSegment(next) });
   });
 }
+
+// the host seat: admitting, muting, removing and sharing, through the
+// meeting tab itself. every act probes the page first, and a selector
+// pack that no longer fits the client refuses with a sentence instead of
+// clicking something adjacent.
+app.post("/api/hostings/:id/controls/:action", async (c) => {
+  const hosting = getHosting(c.req.param("id"));
+  if (!hosting) return c.json({ error: "no such hosting session" }, 404);
+
+  const action = c.req.param("action");
+  const allowed = ["probe", "admit", "mute", "remove", "share", "unshare"];
+  if (!allowed.includes(action)) {
+    return c.json({ error: `unknown control "${action}" (expected ${allowed.join(", ")})` }, 400);
+  }
+
+  const meeting = getMeeting(hosting.meetingId);
+  if (!meeting) return c.json({ error: "the meeting behind this night is gone" }, 404);
+  if (meeting.platform !== "zoom") {
+    return c.json({ error: `host powers are wired for zoom only; this meeting is ${meeting.platform}` }, 501);
+  }
+
+  // shape first: a malformed ask is a client error whether or not a
+  // browser exists to carry it out
+  const body = await c.req.json().catch(() => null);
+  const guest = body?.guest_id ? String(body.guest_id) : "";
+  const needsGuest = ["admit", "mute", "remove"].includes(action);
+  if (needsGuest && !guest) return c.json({ error: `control "${action}" needs guest_id (the name shown in the room)` }, 400);
+
+  const lane = getBrowserLane();
+  if (!lane.isAvailable()) {
+    return c.json({ error: "the browser lane is closed: host powers need the meeting tab, and nothing fakes a host hand" }, 503);
+  }
+
+  const session = await lane.open(meeting.joinUrl, { name: `host:${hosting.id}` });
+  try {
+    const controls = new BrowserHostControls(session, { platform: meeting.platform });
+    if (action === "probe") return c.json({ probe: await controls.probe() });
+
+    try {
+      if (action === "admit") {
+        await controls.admit(guest);
+        putHosting(admitGuest(hosting, { id: guest, name: guest }, Date.now()));
+      }
+      if (action === "mute") await controls.mute(guest);
+      if (action === "remove") await controls.remove(guest);
+      if (action === "share") await controls.startShare(body?.url ? String(body.url) : undefined);
+      if (action === "unshare") await controls.stopShare();
+    } catch (err) {
+      // a mismatch is a 409 with the reason: the page did not agree
+      return c.json({ error: (err as Error).message, action }, 409);
+    }
+    return c.json({ ok: true, action, guest: guest || undefined });
+  } finally {
+    await session.close();
+  }
+});
 
 app.post("/api/hostings/:id/guests", async (c) => {
   const hosting = getHosting(c.req.param("id"));

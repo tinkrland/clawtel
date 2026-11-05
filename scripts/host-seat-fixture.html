@@ -1,0 +1,52 @@
+<!doctype html>
+<html><head><meta charset="utf-8"><title>host seat fixture</title></head>
+<body>
+  <div aria-label="Waiting Room">
+    <ul class="waiting-room-list">
+      <li class="participant-item"><span class="participant-name">Ada Lovelace</span><button aria-label="Admit">Admit</button></li>
+      <li class="participant-item"><span class="participant-name">Grace Hopper</span><button aria-label="Admit">Admit</button></li>
+    </ul>
+  </div>
+  <div aria-label="Participants">
+    <ul class="participants-list">
+      <li class="participant-item">
+        <span class="participant-name">Bob</span>
+        <button aria-label="More options">...</button>
+        <div role="menu" class="menu" style="display:none">
+          <div role="menuitem">Mute</div>
+          <div role="menuitem">Remove</div>
+        </div>
+      </li>
+    </ul>
+  </div>
+  <div id="confirm" style="display:none"><button class="confirm-remove">Remove from meeting</button></div>
+  <button aria-label="Share Screen" id="share">Share</button>
+  <script>
+    // the fixture behaves like the client: menus open on click, the share
+    // control becomes a sharing bar, admits and removals change the DOM
+    document.addEventListener("click", (e) => {
+      const more = e.target.closest('button[aria-label="More options"]');
+      if (more) { more.parentElement.querySelector(".menu").style.display = "block"; return; }
+      const item = e.target.closest('[role="menuitem"]');
+      if (item) {
+        if (/Remove/.test(item.textContent)) document.getElementById("confirm").style.display = "block";
+        item.textContent = "done: " + item.textContent;
+        return;
+      }
+      const confirm = e.target.closest(".confirm-remove");
+      if (confirm) { document.querySelector('[aria-label="Participants"] li').remove(); return; }
+      const admit = e.target.closest('button[aria-label="Admit"]');
+      if (admit) { admit.closest("li").textContent = "admitted"; return; }
+      const share = e.target.closest("#share");
+      if (share) {
+        share.remove();
+        const bar = document.createElement("div");
+        bar.className = "sharing-bar";
+        bar.innerHTML = '<button aria-label="Stop Share">Stop share</button>';
+        document.body.appendChild(bar);
+      }
+      const stop = e.target.closest('button[aria-label="Stop Share"]');
+      if (stop) { stop.parentElement.remove(); window.__stopped = true; }
+    }, true);
+  </script>
+</body></html>

@@ -120,3 +120,32 @@ test("a demo on a demo segment refuses when the browser lane is closed", async (
   const body = await res.json() as { error: string };
   assert.match(body.error, /browser lane is closed/);
 });
+
+test("host controls refuse honestly: unknown action, wrong platform, closed lane", async () => {
+  resetHostings();
+  const meetingId = await aMeeting();
+  const created = await (await call("POST", "/api/hostings", { meeting_id: meetingId, agenda })).json() as { hosting: { id: string } };
+  const id = created.hosting.id;
+
+  const unknown = await call("POST", `/api/hostings/${id}/controls/teleport`, { guest_id: "x" });
+  assert.equal(unknown.status, 400);
+
+  const noGuest = await call("POST", `/api/hostings/${id}/controls/admit`, {});
+  assert.equal(noGuest.status, 400);
+
+  const closed = await call("POST", `/api/hostings/${id}/controls/probe`);
+  assert.equal(closed.status, 503);
+  const body = await closed.json() as { error: string };
+  assert.match(body.error, /browser lane is closed/);
+});
+
+test("host controls say which platform they are wired for", async () => {
+  resetHostings();
+  const res = await call("POST", "/api/meetings", { title: "meet night", platform: "meet", join_url: "https://meet.google.com/abc-defg-hij" });
+  const meeting = (await res.json() as { meeting: { id: string } }).meeting;
+  const created = await (await call("POST", "/api/hostings", { meeting_id: meeting.id, agenda })).json() as { hosting: { id: string } };
+  const probe = await call("POST", `/api/hostings/${created.hosting.id}/controls/probe`);
+  assert.equal(probe.status, 501);
+  const body = await probe.json() as { error: string };
+  assert.match(body.error, /wired for zoom only/);
+});
