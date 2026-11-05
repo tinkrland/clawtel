@@ -13,6 +13,11 @@ import { getMeeting, listMeetings, transitionMeeting } from "./meetings/meeting.
 import { answerForCall } from "./meetings/voice/answer.ts";
 import { renderedLine, say, speakingLane } from "./meetings/voice/say.ts";
 import { tenkiProvider } from "./spawnable/manager.ts";
+import { renderEventDraft, luMaPayload } from "./hosting/listing.ts";
+import { decideAdmission, shareForSegment } from "./hosting/controls.ts";
+import { runDemo } from "./hosting/demo.ts";
+import { createHostingSession, getHosting, listHostings, putHosting } from "./hosting/store.ts";
+import { advanceHosting, admitGuest, backHosting, closeHosting, currentSegment, pauseHosting, remainingMs, resumeHosting, startHosting, tickHosting } from "./hosting/session.ts";
 import { normalizeReaction, reactionExpression, reactionOutcome } from "./meetings/interactivity/reactions.ts";
 import { decideHand, handExpression, handOutcome } from "./meetings/interactivity/hand.ts";
 import { screensharerExpression, screensharerFromExpression, sharerFromViewerText } from "./meetings/interactivity/screensharer.ts";
@@ -23,7 +28,7 @@ import { answerFromTranscriptId } from "./capabilities/questions/answers.ts";
 import { runRecap, type FetchLane, type TranscribeLane } from "./capabilities/recap/pipeline.ts";
 import { emailLaneAvailable, renderCaptureEmail, sendEmail, type OutgoingEmail } from "./relay/email.ts";
 import { spawnableList, spawnableCreate, spawnableDestroy, spawnableStatus } from "./spawnable/manager.ts";
-import { setBrowserLane } from "./meetings/joining/engine.ts";
+import { getBrowserLane, setBrowserLane } from "./meetings/joining/engine.ts";
 import { memory } from "./retelldb/client.ts";
 import { SpawnableBrowserLane } from "./meetings/joining/spawnable-browser.ts";
 
@@ -128,6 +133,126 @@ app.post("/api/meetings", async (c) => {
     { platform: meeting.platform },
   );
   return c.json({ meeting }, 201);
+});
+
+// --- hosting: the agent runs the night, not just attends it ---------
+//
+// a hosting session is built from an agenda that will actually run.
+// the clock only moves a segment when its minutes are gone, and every
+// discretionary move (advance, back, pause) is an explicit act.
+
+app.post("/api/hostings", async (c) => {
+  const body = await c.req.json().catch(() => null);
+  const meetingId = body?.meeting_id;
+  if (!meetingId) return c.json({ error: "hosting needs a meeting_id: a night is hosted somewhere" }, 400);
+  const meeting = getMeeting(String(meetingId));
+  if (!meeting) return c.json({ error: "no such meeting on the books" }, 404);
+  const created = createHostingSession({ meetingId: meeting.id, agenda: body?.agenda });
+  if (!created.ok) return c.json({ error: created.reason }, 400);
+  return c.json({ hosting: created.state });
+});
+
+app.get("/api/hostings", async (c) => c.json({ hostings: listHostings() }));
+
+app.get("/api/hostings/:id", async (c) => {
+  const hosting = getHosting(c.req.param("id"));
+  if (!hosting) return c.json({ error: "no such hosting session" }, 404);
+  return c.json({ hosting, segment: currentSegment(hosting), remainingMs: remainingMs(hosting, Date.now()) });
+});
+
+app.post("/api/hostings/:id/tick", async (c) => {
+  const hosting = getHosting(c.req.param("id"));
+  if (!hosting) return c.json({ error: "no such hosting session" }, 404);
+  const body = await c.req.json().catch(() => null);
+  const now = Number(body?.now) || Date.now();
+  return c.json({ hosting: putHosting(tickHosting(hosting, now)) });
+});
+
+for (const [action, apply] of [
+  ["start", (s: ReturnType<typeof startHosting>, now: number) => startHosting(s, now)],
+  ["advance", (s: ReturnType<typeof startHosting>, now: number) => advanceHosting(s, now)],
+  ["back", (s: ReturnType<typeof startHosting>, now: number) => backHosting(s, now)],
+  ["pause", (s: ReturnType<typeof startHosting>, now: number) => pauseHosting(s, now)],
+  ["resume", (s: ReturnType<typeof startHosting>, now: number) => resumeHosting(s, now)],
+  ["close", (s: ReturnType<typeof startHosting>, now: number) => closeHosting(s, now)],
+] as const) {
+  app.post(`/api/hostings/:id/${action}`, async (c) => {
+    const hosting = getHosting(c.req.param("id"));
+    if (!hosting) return c.json({ error: "no such hosting session" }, 404);
+    const body = await c.req.json().catch(() => null);
+    const now = Number(body?.now) || Date.now();
+    const next = putHosting(apply(hosting, now));
+    return c.json({ hosting: next, segment: currentSegment(next) });
+  });
+}
+
+app.post("/api/hostings/:id/guests", async (c) => {
+  const hosting = getHosting(c.req.param("id"));
+  if (!hosting) return c.json({ error: "no such hosting session" }, 404);
+  const body = await c.req.json().catch(() => null);
+  const guestId = body?.guest_id;
+  if (!guestId) return c.json({ error: "a guest needs an id" }, 400);
+  const policy = (body?.policy ?? "ask") as "all" | "known" | "ask";
+  if (!["all", "known", "ask"].includes(policy)) {
+    return c.json({ error: "policy must be all, known or ask" }, 400);
+  }
+  const decision = decideAdmission(policy, {
+    id: String(guestId),
+    name: body?.name ? String(body.name) : undefined,
+    known: body?.known === true,
+    blocked: body?.blocked === true,
+  });
+  if (decision === "admit") {
+    putHosting(admitGuest(hosting, { id: String(guestId), name: body?.name ? String(body.name) : undefined }, Date.now()));
+  }
+  // a hold is a waiting room, not an error: the human decides next
+  return c.json({ decision, policy });
+});
+
+app.post("/api/hostings/:id/listing", async (c) => {
+  const hosting = getHosting(c.req.param("id"));
+  if (!hosting) return c.json({ error: "no such hosting session" }, 404);
+  const body = await c.req.json().catch(() => null);
+  const listing = renderEventDraft(hosting.agenda, {
+    hostName: body?.host_name ? String(body.host_name) : undefined,
+    startsAt: body?.starts_at ? String(body.starts_at) : undefined,
+    timezone: body?.timezone ? String(body.timezone) : undefined,
+    joinLink: body?.join_link ? String(body.join_link) : undefined,
+    blurb: body?.blurb ? String(body.blurb) : undefined,
+  });
+  return c.json({ ...listing, payload: luMaPayload(listing.draft) });
+});
+
+app.post("/api/hostings/:id/demo", async (c) => {
+  const hosting = getHosting(c.req.param("id"));
+  if (!hosting) return c.json({ error: "no such hosting session" }, 404);
+  const segment = currentSegment(hosting);
+  if (!segment || segment.kind !== "demo" || !segment.demo) {
+    return c.json({ error: "the current segment is not a demo with a script" }, 409);
+  }
+  const meeting = getMeeting(hosting.meetingId);
+  if (!meeting) return c.json({ error: "the meeting behind this night is gone" }, 404);
+
+  const lane = getBrowserLane();
+  if (!lane.isAvailable()) {
+    return c.json({ error: "the browser lane is closed: a demo needs a real browser, and nothing fakes one" }, 503);
+  }
+  const script = segment.demo;
+  const session = await lane.open(script.startUrl ?? meeting.joinUrl, { name: `demo:${hosting.id}` });
+  try {
+    const driver = {
+      navigate: (url: string) => session.navigate(url),
+      click: (selector: string) => session.click(selector),
+      type: (selector: string, text: string) => session.type(selector, text),
+      screenshot: () => session.screenshot(),
+      evaluate: <T>(expression: string) => session.evaluate<T>(expression),
+      sleep: (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms)),
+    };
+    const result = await runDemo(script, driver);
+    return c.json({ demo: result, share: shareForSegment(segment.kind) });
+  } finally {
+    await session.close();
+  }
 });
 
 app.post("/api/meetings/:id/ask", async (c) => {

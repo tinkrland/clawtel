@@ -94,6 +94,8 @@ plus every ts test green.
 
 | speaking lane (tts + room mic) | verified | container and spawnable both live. container: answered, rendered (edge-tts 49,104 bytes, 8.2s), played, monitor captured peak 16457. spawnable: the missing pieces were a session dbus plus wireplumber, and pipewire-pulse plus pulseaudio-utils and ffmpeg; with those, provisionMic passes a tone round trip (peak 12000) and speakInBox writes the line into the box, plays it and captures peak 13785. a probe that plays before capturing reports silence: capture first, then play |
 
+| hosting surface (agent runs the night: agenda, clock, browser demo, listing, guest door) | built, not live-run | agenda validated at the desk (welcome first, close last, demos need a runnable script and 2+ minutes), demo runner with per-step timed receipts (a falsy check or a blank screenshot fails the step), deterministic session clock (lobby/live/paused/closed, pause holds remaining minutes), admission policy defaulting to ask with blocked always refused, listing rendered from the agenda and never published, lu.ma payload as copy to paste (no documented event-creation api). 22 hosting tests plus 6 route tests. not live-run: a hosted night with real guests, and host powers (admit/mute/share) which need a platform module and report closed |
+
 ## honest gaps
 
 - the memory service has no auth beyond an optional api key and no
